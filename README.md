@@ -1,6 +1,6 @@
 # DrM: Mastering Visual Reinforcement Learning through Dormant Ratio Minimization
 <p align="center" style="font-size: 50px">
-   <a href="https://arxiv.org/abs/2310.19668">[Paper]</a>&emsp;<a href="https://drm-rl.github.io/">[Project Website]</a>
+   <a href="https://arxiv.org/abs/2310.19668">[Paper]</a>&emsp;<a href="https://guoweixu.com/drm/">[Project Website]</a>
 </p>
 
 This repository is the official PyTorch implementation of **DrM**. **DrM**, a visual reinforcement learning algorithm, minimizes the dormant ratio to guide exploration-exploitation trade-offs and achieves remarkable significant sample efficiency and asymptotic performance in the hardest locomotion and manipulation tasks.
