@@ -1,9 +1,10 @@
 import cv2
 import imageio
+import wandb
 
 
 class VideoRecorder:
-    def __init__(self, root_dir, render_size=256, fps=20):
+    def __init__(self, root_dir, render_size=256, fps=20, use_wandb=False):
         if root_dir is not None:
             self.save_dir = root_dir / 'eval_video'
             self.save_dir.mkdir(exist_ok=True)
@@ -12,12 +13,25 @@ class VideoRecorder:
 
         self.render_size = render_size
         self.fps = fps
+        self.use_wandb = use_wandb
         self.frames = []
 
     def init(self, env, enabled=True):
         self.frames = []
         self.enabled = self.save_dir is not None and enabled
         self.record(env)
+
+    def init_obs(self, obs, enabled=True):
+        self.frames = []
+        self.enabled = self.save_dir is not None and enabled
+        self.record_obs(obs)
+
+    def record_obs(self, obs):
+        if self.enabled:
+            frame = cv2.resize(obs[-3:].transpose(1, 2, 0),
+                               dsize=(self.render_size, self.render_size),
+                               interpolation=cv2.INTER_CUBIC)
+            self.frames.append(frame)
 
     def record(self, env):
         if self.enabled:
@@ -37,6 +51,15 @@ class VideoRecorder:
                 import numpy as np
                 self.frames = np.array(self.frames, dtype=np.uint8).transpose(0, 2, 3, 1)
             imageio.mimsave(str(path), self.frames, fps=self.fps)
+            if self.use_wandb and wandb.run is not None:
+                try:
+                    wandb.log({
+                        'eval/video': wandb.Video(str(path),
+                                                  fps=self.fps,
+                                                  format='mp4')
+                    }, commit=False)
+                except Exception as exc:
+                    print(f'[wandb] failed to upload eval video {path}: {exc}')
 
 
 class TrainVideoRecorder:

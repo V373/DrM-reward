@@ -42,7 +42,9 @@ def soft_update_params(net, target_net, tau):
 
 
 def to_torch(xs, device):
-    return tuple(torch.as_tensor(x, device=device) for x in xs)
+    # loader 已 pin_memory，非阻塞拷贝可与后续 kernel launch 重叠
+    return tuple(
+        torch.as_tensor(x).to(device, non_blocking=True) for x in xs)
 
 
 def weight_init(m):

@@ -1,5 +1,6 @@
 import torch
 import math
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
@@ -148,10 +149,12 @@ class DrMAgent:
                  target_dormant_ratio, dormant_temp,dormant_perturb_interval,
                  min_perturb_factor, max_perturb_factor, perturb_rate, target_lambda,
                  num_expl_steps, stddev_type, stddev_schedule, stddev_clip,
-                 expectile, use_tb):
+                 expectile, use_tb, log_every_steps):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.use_tb = use_tb
+        self.log_every_steps = log_every_steps
+        self._log_now = False
         self.num_expl_steps = num_expl_steps
         self.stddev_type = stddev_type
         self.stddev_schedule = stddev_schedule
@@ -241,6 +244,19 @@ class DrMAgent:
                 action.uniform_(-1.0, 1.0)
         return action.cpu().numpy()[0]
 
+    def act_batch(self, obs, step, eval_mode):
+        # env observations are transposed views; Encoder.forward's view() needs contiguity
+        obs = torch.as_tensor(np.ascontiguousarray(obs), device=self.device)
+        obs = self.encoder(obs)
+        dist = self.actor(obs, self.stddev(step))
+        if eval_mode:
+            action = dist.mean
+        else:
+            action = dist.sample(clip=None)
+            if step < self.num_expl_steps:
+                action.uniform_(-1.0, 1.0)
+        return action.cpu().numpy()
+
     def update_predictor(self, obs, action):
         metrics = dict()
 
@@ -253,7 +269,7 @@ class DrMAgent:
                                                                 self.expectile)
         predictor_loss = (vf_weight * (vf_err**2)).mean()
 
-        if self.use_tb:
+        if self._log_now:
             metrics['predictor_loss'] = predictor_loss.item()
 
         self.predictor_opt.zero_grad(set_to_none=True)
@@ -279,7 +295,7 @@ class DrMAgent:
         Q1, Q2 = self.critic(obs, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
-        if self.use_tb:
+        if self._log_now:
             metrics['critic_target_q'] = target_Q.mean().item()
             metrics['critic_q1'] = Q1.mean().item()
             metrics['critic_q2'] = Q2.mean().item()
@@ -298,7 +314,6 @@ class DrMAgent:
         metrics = dict()
         dist = self.actor(obs, self.stddev(step))
         action = dist.sample(clip=self.stddev_clip)
-        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
 
@@ -309,9 +324,10 @@ class DrMAgent:
         actor_loss.backward()
         self.actor_opt.step()
 
-        if self.use_tb:
+        if self._log_now:
             metrics['actor_loss'] = actor_loss.item()
-            metrics['actor_logprob'] = log_prob.mean().item()
+            metrics['actor_logprob'] = dist.log_prob(action).sum(
+                -1, keepdim=True).mean().item()
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
 
         return metrics
@@ -326,6 +342,7 @@ class DrMAgent:
         
     def update(self, replay_iter, step):
         metrics = dict()
+        self._log_now = self.use_tb and step % self.log_every_steps == 0
 
         if step % self.dormant_perturb_interval == 0:
             self.perturb()
@@ -348,7 +365,7 @@ class DrMAgent:
         if self.awaken_step is None and self.dormant_ratio < self.target_dormant_ratio:
             self.awaken_step = step
 
-        if self.use_tb:
+        if self._log_now:
             metrics['batch_reward'] = reward.mean().item()
             metrics['actor_dormant_ratio'] = self.dormant_ratio
 

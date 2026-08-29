@@ -18,11 +18,14 @@ from dm_env import specs
 import metaworld_env as mw
 
 from logger import Logger
+from parallel_env import ParallelMetaWorld
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import wandb
 import math
 import re
+import time
+from tqdm.auto import tqdm
 
 torch.backends.cudnn.benchmark = True
 
@@ -70,8 +73,16 @@ class Workspace:
         # create envs
         self.train_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
                                   self.cfg.action_repeat, self.cfg.seed)
-        self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed)
+        self.eval_env, self.eval_envs = None, None
+        if self.cfg.num_eval_envs > 1:
+            self.eval_envs = ParallelMetaWorld(self.cfg.task_name,
+                                              self.cfg.frame_stack,
+                                              self.cfg.action_repeat,
+                                              self.cfg.seed,
+                                              self.cfg.num_eval_envs)
+        else:
+            self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
+                                     self.cfg.action_repeat, self.cfg.seed)
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
@@ -88,10 +99,11 @@ class Workspace:
             self._discount - self._discount_alpha - self._discount_beta)
         self._replay_iter = None
 
-        #self.video_recorder = VideoRecorder(
-            #self.work_dir if self.cfg.save_video else None)
-        #self.train_video_recorder = TrainVideoRecorder(
-            #self.work_dir if self.cfg.save_train_video else None)
+        self.video_recorder = VideoRecorder(
+            self.work_dir if self.cfg.save_video else None,
+            use_wandb=self.cfg.use_wandb)
+        self.train_video_recorder = TrainVideoRecorder(
+            self.work_dir if self.cfg.save_train_video else None)
 
     @property
     def global_step(self):
@@ -129,13 +141,18 @@ class Workspace:
         return
 
     def eval(self):
+        eval_start = time.time()
+        if self.eval_envs is not None:
+            self._eval_parallel(eval_start)
+            return
         step, episode, total_reward, total_sr = 0, 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
 
         while eval_until_episode(episode):
             episode_sr = False
             time_step = self.eval_env.reset()
-            #self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+            self.video_recorder.init_obs(time_step.observation,
+                                         enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
 
@@ -143,25 +160,56 @@ class Workspace:
                                             self.global_step,
                                             eval_mode=True)
                 time_step = self.eval_env.step(action)
+                self.video_recorder.record_obs(time_step.observation)
                 episode_sr = episode_sr or time_step.success
                 total_reward += time_step.reward
                 step += 1
 
             total_sr += episode_sr
             episode += 1
+            self.video_recorder.save(f'{self.global_frame}.mp4')
 
-            #if self.global_frame > 1000000 and success > 0 and save_num < 4:
-                #imageio.mimsave(video_path, frames, format='GIF', duration = 40)
-                #save_num += 1
-                #print(video_path)
-            #self.video_recorder.save(f'{self.global_frame}.mp4')
+        self._log_eval(step, episode, total_reward, total_sr, eval_start)
 
+    def _eval_parallel(self, eval_start):
+        n = self.eval_envs.num_envs
+        step, episode, total_reward, total_sr = 0, 0, 0.0, 0.0
+
+        while episode < self.cfg.num_eval_episodes:
+            # only the first `keep` envs count when n does not divide the total
+            keep = min(n, self.cfg.num_eval_episodes - episode)
+            obs, _, _, _ = self.eval_envs.reset()
+            self.video_recorder.init_obs(obs[0], enabled=(episode == 0))
+            ep_reward = np.zeros(n, dtype=np.float64)
+            ep_sr = np.zeros(n, dtype=bool)
+            last = np.zeros(n, dtype=bool)
+            while not last.any():
+                with torch.no_grad(), utils.eval_mode(self.agent):
+                    action = self.agent.act_batch(obs,
+                                                  self.global_step,
+                                                  eval_mode=True)
+                obs, reward, success, last = self.eval_envs.step(action)
+                self.video_recorder.record_obs(obs[0])
+                ep_sr |= success
+                ep_reward += reward
+                step += keep
+
+            total_reward += ep_reward[:keep].sum()
+            total_sr += ep_sr[:keep].sum()
+            episode += keep
+            self.video_recorder.save(f'{self.global_frame}.mp4')
+
+        self._log_eval(step, episode, total_reward, total_sr, eval_start)
+
+    def _log_eval(self, step, episode, total_reward, total_sr, eval_start):
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_success_rate', total_sr / episode)
             log('episode_reward', total_reward / episode)
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
+        print(f'[eval] frame={self.global_frame} '
+              f'episodes={episode} took {time.time() - eval_start:.1f}s')
 
     def train(self):
         # predicates
@@ -177,6 +225,11 @@ class Workspace:
         self.replay_storage.add(time_step)
         # self.train_video_recorder.init(time_step.observation)
         metrics = None
+        progress_bar = tqdm(total=self.cfg.num_train_frames,
+                    initial=self.global_frame,
+                    desc='train',
+                    unit='frame',
+                    dynamic_ncols=True)
         while train_until_step(self.global_step):
             if time_step.last():
                 self._global_episode += 1
@@ -200,9 +253,6 @@ class Workspace:
                         log('buffer_size', len(self.replay_storage))
                         log('step', self.global_step)
 
-                # reset env
-                time_step = self.train_env.reset()
-                self.replay_storage.add(time_step)
                 # self.train_video_recorder.init(time_step.observation)
                 # try to save snapshot
                 if self.cfg.save_snapshot:
@@ -236,6 +286,9 @@ class Workspace:
             #self.train_video_recorder.record(time_step.observation)
             episode_step += 1
             self._global_step += 1
+            progress_bar.update(self.cfg.action_repeat)
+
+        progress_bar.close()
 
     def save_snapshot(self):
         snapshot = self.work_dir / 'snapshot.pt'
@@ -261,7 +314,11 @@ def main(cfgs):
     if snapshot.exists():
         print(f'resuming: {snapshot}')
         workspace.load_snapshot()
-    workspace.train()
+    try:
+        workspace.train()
+    finally:
+        if workspace.eval_envs is not None:
+            workspace.eval_envs.close()
 
 
 if __name__ == '__main__':
