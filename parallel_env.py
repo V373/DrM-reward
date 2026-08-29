@@ -9,14 +9,15 @@ import multiprocessing as mp
 import numpy as np
 
 
-def _worker(conn, task_name, frame_stack, action_repeat, seed):
+def _worker(conn, task_name, frame_stack, action_repeat, seed, reward_type):
     import metaworld_env as mw
 
     # MetaWorld's _get_state_rand_vec draws from the global numpy RNG, not the
     # env seed, so workers must be seeded explicitly or they all replay the
     # same task sequence.
     np.random.seed(seed)
-    env = mw.make(task_name, frame_stack, action_repeat, seed)
+    env = mw.make(task_name, frame_stack, action_repeat, seed,
+                  reward_type=reward_type)
     conn.send(env.action_spec().shape)
     try:
         while True:
@@ -39,7 +40,7 @@ class ParallelMetaWorld:
     """Runs `num_envs` MetaWorld envs in worker processes, one pipe each."""
 
     def __init__(self, task_name, frame_stack, action_repeat, base_seed,
-                 num_envs, start_method='forkserver'):
+                 num_envs, reward_type='dense', start_method='forkserver'):
         try:
             ctx = mp.get_context(start_method)
         except ValueError:
@@ -53,7 +54,8 @@ class ParallelMetaWorld:
             parent, child = ctx.Pipe()
             proc = ctx.Process(target=_worker,
                                args=(child, task_name, frame_stack,
-                                     action_repeat, base_seed + rank),
+                                     action_repeat, base_seed + rank,
+                                     reward_type),
                                daemon=True)
             proc.start()
             child.close()

@@ -19,6 +19,7 @@ num_eval_envs: 20
 save_snapshot: false
 # wandb
 use_wandb: true
+wandb_run_name_prefix: ''
 # replay buffer
 replay_buffer_size: 750000 # 1x10^6 this will cost 59 GiB, shit
 replay_buffer_num_workers: 4

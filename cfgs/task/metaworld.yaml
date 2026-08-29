@@ -8,3 +8,4 @@ discount_alpha: 0.02
 discount_beta: 0.007
 nstep: 3
 nstep_alpha: 7
+reward_type: sparse

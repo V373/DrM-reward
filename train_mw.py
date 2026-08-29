@@ -43,6 +43,7 @@ class Workspace:
         self.cfg = cfg
         if self.cfg.use_wandb:
             exp_name = '_'.join([cfg.task_name, str(cfg.seed)])
+            exp_name = f'{cfg.wandb_run_name_prefix}{exp_name}'
             group_name = re.search(r'\.(.+)\.', cfg.agent._target_).group(1)
             wandb.init(project="DrM",
                        group=group_name,
@@ -72,17 +73,20 @@ class Workspace:
                              use_wandb=self.cfg.use_wandb)
         # create envs
         self.train_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed)
+                                  self.cfg.action_repeat, self.cfg.seed,
+                                  reward_type=self.cfg.reward_type)
         self.eval_env, self.eval_envs = None, None
         if self.cfg.num_eval_envs > 1:
             self.eval_envs = ParallelMetaWorld(self.cfg.task_name,
                                               self.cfg.frame_stack,
                                               self.cfg.action_repeat,
                                               self.cfg.seed,
-                                              self.cfg.num_eval_envs)
+                                              self.cfg.num_eval_envs,
+                                              reward_type=self.cfg.reward_type)
         else:
             self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
-                                     self.cfg.action_repeat, self.cfg.seed)
+                                     self.cfg.action_repeat, self.cfg.seed,
+                                     reward_type=self.cfg.reward_type)
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),

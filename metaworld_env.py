@@ -91,6 +91,66 @@ class MetaWorld:
         }
         return obs
 
+
+class OuterTransition(NamedTuple):
+    state: Any
+    action: Any
+    next_state: Any
+    dense_reward: Any
+    success: Any
+
+
+def custom_outer_reward(transition):
+    raise NotImplementedError(
+        'Implement custom_outer_reward() before using reward_type=custom')
+
+
+class OuterRewardWrapper:
+    _VALID_REWARD_TYPES = ('dense', 'sparse', 'custom')
+
+    def __init__(self, env, reward_type='dense'):
+        if reward_type not in self._VALID_REWARD_TYPES:
+            raise ValueError(
+                f'Unknown reward_type {reward_type!r}; expected one of '
+                f'{self._VALID_REWARD_TYPES}')
+        self._env = env
+        self._reward_type = reward_type
+        self._state = None
+
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+        try:
+            return getattr(self._env, name)
+        except AttributeError:
+            raise ValueError(name)
+
+    def reset(self):
+        obs = self._env.reset()
+        self._state = np.array(obs['state'], copy=True)
+        return obs
+
+    def step(self, action):
+        if self._state is None:
+            raise RuntimeError('Must reset environment before stepping.')
+
+        obs = self._env.step(action)
+        transition = OuterTransition(
+            state=self._state,
+            action=np.array(action['action'], copy=True),
+            next_state=np.array(obs['state'], copy=True),
+            dense_reward=obs['reward'],
+            success=bool(obs['success']))
+
+        if self._reward_type == 'sparse':
+            obs['reward'] = float(transition.success)
+        elif self._reward_type == 'custom':
+            obs['reward'] = float(custom_outer_reward(transition))
+
+        self._state = transition.next_state
+        return obs
+
+
 class NormalizeAction:
     def __init__(self, env, key="action"):
         self._env = env
@@ -226,9 +286,10 @@ class metaworld_wrapper():
                                  discount=1.0,
                                 success = time_step['success'])
 
-def make(name, frame_stack, action_repeat, seed):
+def make(name, frame_stack, action_repeat, seed, reward_type='dense'):
     env = MetaWorld(name, seed,action_repeat, (84,84), 'corner2')
     env = NormalizeAction(env)
+    env = OuterRewardWrapper(env, reward_type)
     env = TimeLimit(env, 250)
     env = metaworld_wrapper(env, frame_stack)
 
