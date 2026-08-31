@@ -2,6 +2,7 @@ import datetime
 import io
 import random
 import traceback
+import warnings
 from collections import defaultdict
 
 import numpy as np
@@ -11,7 +12,36 @@ from torch.utils.data import IterableDataset
 
 def episode_len(episode):
     # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+    return episode['action'].shape[0] - 1
+
+
+def encode_frame_stack(episode, frame_stack):
+    """Drop the redundant overlap between consecutive stacked observations."""
+    obs = episode['observation']
+    if obs.ndim != 4 or obs.shape[1] % frame_stack != 0:
+        return episode
+    c = obs.shape[1] // frame_stack
+    if not np.array_equal(obs[:-1, c:], obs[1:, :-c]):
+        return episode
+    head = obs[0, :-c].reshape(frame_stack - 1, c, *obs.shape[2:])
+    episode = dict(episode)
+    del episode['observation']
+    episode['observation_frames'] = np.concatenate([head, obs[:, -c:]], axis=0)
+    return episode
+
+
+def decode_frame_stack(episode, frame_stack):
+    """Rebuild [L, F*C, H, W] as overlapping strided views sharing the frame buffer."""
+    frames = episode.pop('observation_frames')
+    n, c, h, w = frames.shape
+    flat = np.ascontiguousarray(frames).reshape(-1, h, w)
+    it = flat.itemsize
+    episode['observation'] = np.lib.stride_tricks.as_strided(
+        flat,
+        shape=(n - frame_stack + 1, frame_stack * c, h, w),
+        strides=(c * h * w * it, h * w * it, w * it, it),
+        writeable=False)
+    return episode
 
 
 def save_episode(episode, fn):
@@ -30,9 +60,10 @@ def load_episode(fn):
 
 
 class ReplayBufferStorage:
-    def __init__(self, data_specs, replay_dir):
+    def __init__(self, data_specs, replay_dir, frame_stack=None):
         self._data_specs = data_specs
         self._replay_dir = replay_dir
+        self._frame_stack = frame_stack
         replay_dir.mkdir(exist_ok=True)
         self._current_episode = defaultdict(list)
         self._preload()
@@ -53,6 +84,8 @@ class ReplayBufferStorage:
                 value = self._current_episode[spec.name]
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
+            if self._frame_stack is not None:
+                episode = encode_frame_stack(episode, self._frame_stack)
             self._store_episode(episode)
 
     def _preload(self):
@@ -75,8 +108,9 @@ class ReplayBufferStorage:
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, replay_dir, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot):
+                 fetch_every, save_snapshot, frame_stack=None):
         self._replay_dir = replay_dir
+        self._frame_stack = frame_stack
         self._size = 0
         self._max_size = max_size
         self._num_workers = max(1, num_workers)
@@ -87,6 +121,8 @@ class ReplayBuffer(IterableDataset):
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
+        self._reported_compact_format = False
+        self._warned_legacy_format = False
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -95,8 +131,23 @@ class ReplayBuffer(IterableDataset):
     def _store_episode(self, eps_fn):
         try:
             episode = load_episode(eps_fn)
-        except:
+        except Exception:
             return False
+        if 'observation_frames' in episode:
+            if not self._reported_compact_format:
+                channels = episode['observation_frames'].shape[1]
+                print(f'[replay] compact observation: {channels}ch frames -> '
+                      f'{channels * self._frame_stack}ch stack', flush=True)
+                self._reported_compact_format = True
+            episode = decode_frame_stack(episode, self._frame_stack)
+        elif self._frame_stack is not None and not self._warned_legacy_format:
+            channels = episode['observation'].shape[1]
+            warnings.warn(
+                f'legacy replay observation uses {channels} channels; '
+                'keeping the stacked episode in memory',
+                RuntimeWarning,
+                stacklevel=2)
+            self._warned_legacy_format = True
         eps_len = episode_len(episode)
         while eps_len + self._size > self._max_size:
             early_eps_fn = self._episode_fns.pop(0)
@@ -171,7 +222,7 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount):
+                       save_snapshot, nstep, discount, frame_stack=None):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(replay_dir,
@@ -180,7 +231,8 @@ def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                             nstep,
                             discount,
                             fetch_every=1000,
-                            save_snapshot=save_snapshot)
+                            save_snapshot=save_snapshot,
+                            frame_stack=frame_stack)
 
     loader = torch.utils.data.DataLoader(iterable,
                                          batch_size=batch_size,

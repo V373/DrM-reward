@@ -127,13 +127,15 @@ class Workspace:
                       specs.Array((1, ), np.float32, 'discount'))
 
         self.replay_storage = ReplayBufferStorage(data_specs,
-                                                  self.work_dir / 'buffer')
+                                                  self.work_dir / 'buffer',
+                                                  frame_stack=self.cfg.frame_stack)
         self.replay_loader, self.buffer = make_replay_loader(
             self.work_dir / 'buffer', self.cfg.replay_buffer_size,
             self.cfg.batch_size,
             self.cfg.replay_buffer_num_workers, self.cfg.save_snapshot,
             math.floor(self._nstep + self._nstep_alpha),
-            self._discount - self._discount_alpha - self._discount_beta)
+            replay_discount,
+            frame_stack=self.cfg.frame_stack)
         self._replay_iter = None
 
         self.video_recorder = VideoRecorder(
