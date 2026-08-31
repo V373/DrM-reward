@@ -11,6 +11,7 @@ from datetime import datetime
 import gym
 import argparse
 
+
 # Suppress float conversion warnings
 gym.logger.set_level(40)
 
@@ -95,38 +96,17 @@ def crop_frame(frame, crop_box):
     return frame[top:bottom, left:right].copy()
 
 
-# TODO: This doesn't work. How do we seed single goal envs?
-"""
-SEED = 0  # some seed number here
-benchmark = metaworld.BENCHMARK(seed=SEED)
-"""
-
-
-###########################
-# Instructions for using different renderers (CPU vs GPU) with mujoco-py: http://vedder.io/misc/mujoco_py.html
-###########################
-
-
-##########################
-"""
-For constructing semi-shaped (our) reward, note that every env. has an evaluate_state(.) method, which returns an info dict with
-various reward components., such as in_place_reward, near_object, etc. We just need to interpret them and assign our reward instead
-of the one provided by MW.
-"""
-
-
-# TODO: which action noise level to apply? For ideas, see https://github.com/rlworkgroup/metaworld/blob/cfd837e31d65c9d2b62b7240c68a26b04a9166d9/tests/metaworld/envs/mujoco/sawyer_xyz/test_scripted_policies.py
-
 def gen_data(tasks, num_traj, noise, res, include_depth, camera, data_dir_path,
              write_data=True, write_video=False, video_fps=80,
-             crop_size=None, crop_offset=None):
+             max_attempts=None, crop_size=None, crop_offset=None):
+    """Generate exactly num_traj successful trajectories per selected task."""
     res = (res, res)
     crop_box, saved_res = configure_image_crop(res, crop_size, crop_offset)
-    MAX_steps_at_goal = 10
+    max_steps_at_goal = 10
     act_tolerance = 1e-5
     lim = 1 - act_tolerance
 
-    print(f'Available tasks: {metaworld.ML1.ENV_NAMES}, in total {len(metaworld.ML1.ENV_NAMES)} tasks.')  # Check out the available environments
+    print(f'Available tasks: {metaworld.ML1.ENV_NAMES}, in total {len(metaworld.ML1.ENV_NAMES)} tasks.')
     if crop_box is not None:
         location = (
             'centered' if crop_offset is None
@@ -138,74 +118,118 @@ def gen_data(tasks, num_traj, noise, res, include_depth, camera, data_dir_path,
         )
 
     for case in test_cases_latest_nonoise:
-
-        if case[0] not in tasks: # target_tasks:
+        if case[0] not in tasks:
             continue
 
         task_name = case[0]
         policy = case[1]
-
         print(f'----------Running task {task_name}------------')
 
-        # Note that, although the environment will generate dense reward (goal_cost_reward=False), we will be able to construct any goal-cost reward and subgoal reward
-        # when we load this dataset.
-        env = metaworld.mw_gym_make(task_name, goal_cost_reward=False, stop_at_goal=True, steps_at_goal=MAX_steps_at_goal, cam_height=res[0], cam_width=res[1], depth=include_depth, cam_name=camera, train_distrib=True)
+        env = metaworld.mw_gym_make(
+            task_name,
+            goal_cost_reward=False,
+            stop_at_goal=True,
+            steps_at_goal=max_steps_at_goal,
+            cam_height=res[0],
+            cam_width=res[1],
+            depth=include_depth,
+            cam_name=camera,
+            train_distrib=True,
+        )
         action_space_ptp = env.action_space.high - env.action_space.low
 
         num_successes = 0
+        num_attempts = 0
+        task_max_attempts = 10 * num_traj if max_attempts is None else max_attempts
         dt = datetime.now()
         height, width = saved_res
-        data_file_name = task_name + '-num-traj_' + str(num_traj) + '-noise_' + str(noise) + '-res_' + str(height) + '_' + str(width) + '-cam_' + camera + '-depth_' + str(include_depth) + '_' + dt.strftime("%d-%m-%Y-%H.%M.%S") + '.hdf5'
+        data_file_name = (
+            task_name + '-num-traj_' + str(num_traj) + '-noise_' + str(noise) +
+            '-' + dt.strftime("%d-%m-%Y-%H.%M.%S") + '.hdf5'
+        )
         video_path_root = 'movies'
-        video_dir_path = os.path.join(video_path_root, task_name + '-noise_' + str(noise) + '-res_' + str(height) + '_' + str(width) + '-cam_' + camera + '_' + dt.strftime("%d-%m-%Y-%H.%M.%S"))
+        video_dir_path = os.path.join(
+            video_path_root,
+            task_name + '-noise_' + str(noise) + '-res_' + str(height) +
+            '_' + str(width) + '-cam_' + camera + '_' +
+            dt.strftime("%d-%m-%Y-%H.%M.%S"),
+        )
 
-        data_writer = MWDatasetWriter(data_dir_path, data_file_name, env, task_name, saved_res, camera, include_depth, act_tolerance, MAX_steps_at_goal, write_data=write_data)
+        data_writer = MWDatasetWriter(
+            data_dir_path,
+            data_file_name,
+            env,
+            task_name,
+            saved_res,
+            camera,
+            include_depth,
+            act_tolerance,
+            max_steps_at_goal,
+            write_data=write_data,
+        )
 
-        for attempt in range(num_traj):
-            video_writer = MWVideoWriter(video_dir_path, task_name + '-' + str(attempt + 1), video_fps, (saved_res[1], saved_res[0]), write_video=write_video)
+        while num_successes < num_traj:
+            if task_max_attempts != -1 and num_attempts >= task_max_attempts:
+                data_writer.data = data_writer._reset_data()
+                data_writer.close()
+                raise RuntimeError(
+                    f'{task_name}: generated {num_successes}/{num_traj} '
+                    f'successful trajectories after {num_attempts} attempts'
+                )
+
+            num_attempts += 1
+            video_writer = MWVideoWriter(
+                video_dir_path,
+                task_name + '-' + str(num_attempts),
+                video_fps,
+                (saved_res[1], saved_res[0]),
+                write_video=write_video,
+            )
 
             state = env.reset()
-            start_time = time.time()
+            episode_success = False
 
             for t in range(env.max_path_length):
                 action = policy.get_action(state['full_state'])
                 action = np.random.normal(action, noise * action_space_ptp)
-                # Clip the action
                 action = np.clip(action, -lim, lim)
                 new_state, reward, done, info = env.step(action)
                 image = crop_frame(state['image'], crop_box)
                 depth = crop_frame(state['depth'], crop_box) if include_depth else state['depth']
-                data_writer.append_data(state['full_state'], state['proprio_state'], image, depth, action, reward, done, info)
+                data_writer.append_data(
+                    state['full_state'],
+                    state['proprio_state'],
+                    image,
+                    depth,
+                    action,
+                    reward,
+                    done,
+                    info,
+                )
                 video_writer.write(image)
-
-                strpr = f"Step {t} |||"
-                for k in info:
-                    strpr += f"{k}: {info[k]}, "
-                #print(strpr)
                 state = new_state
 
                 if done:
-                    if info['task_accomplished']:
-                        print(f'Attempt {attempt + 1} succeeded at step {t}')
-                        num_successes += 1
-                        end_time = time.time()
+                    episode_success = bool(info.get('task_accomplished', False))
+                    if episode_success:
+                        print(f'Attempt {num_attempts} succeeded at step {t}')
                     else:
-                        print(f'Attempt {attempt + 1} ended unsuccessfully at time step {t}')
-                        end_time = time.time()
-
-                    print(f"Average time per step: {(end_time-start_time) / t}")
+                        print(f'Attempt {num_attempts} failed at time step {t}')
                     break
 
-            data_writer.write_trajectory()
+            if episode_success:
+                data_writer.write_trajectory()
+                num_successes += 1
+            else:
+                # Discard the failed episode so it is not written into HDF5.
+                data_writer.data = data_writer._reset_data()
 
         data_writer.close()
-        print(f'--------------------------------------------------------\n')
-        print(f'Success rate for {task_name}: {num_successes / num_traj}\n')
+        print(f'Generated {num_successes} successful trajectories in {num_attempts} attempts.')
+        print(f'Success rate among saved trajectories for {task_name}: 1.0\n')
 
-        # Check the created dataset
         if write_data:
             qlearning_dataset(os.path.join(data_dir_path, data_file_name), reward_type='subgoal')
-
 
 
 def add_boolean_arg(parser, name, true, false, default):
@@ -217,21 +241,15 @@ def add_boolean_arg(parser, name, true, false, default):
     parser.set_defaults(**{name: default})
 
 
-
-#python metaworld/data/training_data_gen.py --tasks=assembly-v2  --num_traj=10 --noise=0.1 --res=300 -f=20 --camera=corner --nowrite_data --write_video
-#python metaworld/data/training_data_gen.py --tasks=door-open-v2  --num_traj=10 --noise=0.1 --res=300 -f=20 --camera=corner --nowrite_data --write_video
-#python metaworld/data/training_data_gen.py --tasks=door-open-v2  -d=data --num_traj=10 --noise=0.1 --res=84 -f=20 --camera=corner --write_data --write_video
-#python metaworld/data/training_data_gen.py --tasks=door-open-v2  -d=data --num_traj=10 --noise=0.1 --res=84 -f=20 --include_depth --camera=corner --write_data --include_depth --nowrite_video
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-t", "--tasks", type=str, nargs='+', help = "Tasks for which to generate trajectories from scripted policies")
-    parser.add_argument("-n", "--num_traj", type=int, help = "Number of trajectories to generate for each task")
-    parser.add_argument("-p", "--noise", type=float, default=0, help = "Action noise as a fraction of the action space, e.g., 0.1")
-    parser.add_argument("-r", "--res", type=int, default=224, help = "Native MuJoCo render resolution before optional crop (r x r)")
-    parser.add_argument("-c", "--camera", type=str, default='corner2', help = "Camera. Possible values: 'corner', 'topview', 'corner2', 'corner3', 'behindGripper', 'gripperPOV'")
-    parser.add_argument("-f", "--video_fps", type=int, default=80, help = "Fps for recording videos. Ignored if the --nowrite_video flag is present.")
-    parser.add_argument("-d", "--data_dir_path", type=str, default='data', help = "Directory where the demonstration data is to be written. Ignored if the ---nowrite_data flag is present.")
+    parser.add_argument("-t", "--tasks", type=str, nargs='+', help="Tasks for which to generate trajectories")
+    parser.add_argument("-n", "--num_traj", type=int, help="Number of successful trajectories per task")
+    parser.add_argument("-p", "--noise", type=float, default=0, help="Action noise as a fraction of the action space")
+    parser.add_argument("-r", "--res", type=int, default=224, help="Native MuJoCo render resolution before optional crop (r x r)")
+    parser.add_argument("-c", "--camera", type=str, default='corner2', help="Camera name")
+    parser.add_argument("-f", "--video_fps", type=int, default=80, help="Video FPS")
+    parser.add_argument("-d", "--data_dir_path", type=str, default='data', help="Directory for demonstration data")
     parser.add_argument(
         "--center-crop",
         type=int,
@@ -246,7 +264,12 @@ if __name__ == "__main__":
         metavar=("LEFT", "TOP"),
         help="Place the HxW crop with its left/top edges at LEFT/TOP; requires --center-crop",
     )
-    # Should we generate depth frames (HxW arrays whose entries are distances from the camera to objects in the scene, *in millimeters*) in addition to RGB frames?
+    parser.add_argument(
+        "--max_attempts",
+        type=int,
+        default=None,
+        help="Maximum attempts per task; default is 10*num_traj, -1 means unlimited",
+    )
     add_boolean_arg(parser, 'include_depth', true='--include_depth', false='--noinclude_depth', default=False)
     add_boolean_arg(parser, 'write_data', true='--write_data', false='--nowrite_data', default=True)
     add_boolean_arg(parser, 'write_video', true='--write_video', false='--nowrite_video', default=False)
@@ -259,11 +282,8 @@ if __name__ == "__main__":
     if args.crop_offset is not None and any(offset < 0 for offset in args.crop_offset):
         parser.error("--crop-offset LEFT TOP must both be non-negative")
 
-    print(f'\n')
-    print(f'Generating {args.num_traj} trajectories with action noise {args.noise} for tasks {args.tasks} with video resolution {args.res}x{args.res} and {args.camera} camera view.')
-    if args.write_video:
-        print(f'Videos will be generated at {args.video_fps} fps\n')
-
+    print(f'Generating {args.num_traj} successful trajectories with action noise {args.noise} '
+          f'for tasks {args.tasks} at {args.res}x{args.res}.')
     gen_data(
         args.tasks,
         args.num_traj,
@@ -275,6 +295,7 @@ if __name__ == "__main__":
         write_data=args.write_data,
         write_video=args.write_video,
         video_fps=args.video_fps,
+        max_attempts=args.max_attempts,
         crop_size=tuple(args.center_crop) if args.center_crop is not None else None,
         crop_offset=tuple(args.crop_offset) if args.crop_offset is not None else None,
     )

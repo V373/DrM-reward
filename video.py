@@ -53,6 +53,12 @@ class VideoRecorder:
             imageio.mimsave(str(path), self.frames, fps=self.fps)
             if self.use_wandb and wandb.run is not None:
                 try:
+                    # MetaWorld default timing in train_mw: native env.step() is
+                    # 80 Hz and action_repeat=2, while this recorder stores one
+                    # frame per outer step. The recorded states are therefore
+                    # 40 Hz, but self.fps is 20 by default, so eval/video plays
+                    # at 2x slower than simulated time (unless either setting
+                    # is overridden).
                     wandb.log({
                         'eval/video': wandb.Video(str(path),
                                                   fps=self.fps,
