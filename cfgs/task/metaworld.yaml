@@ -9,3 +9,27 @@ discount_beta: 0.007
 nstep: 3
 nstep_alpha: 7
 reward_type: sparse
+
+shaped_reward:
+  enabled: false
+  type: pbrs
+  frame_history_stride: 4
+  sparse_scale: 1.0
+  pbrs_gamma: 0.97
+  pbrs_dense_scale: 1.0
+  pbrs_progress_bias_enabled: false
+  pbrs_progress_bias_b: 0.0
+  pbrs_progress_exp_enabled: false
+  pbrs_progress_exp_base: 32.0
+  posterior_temperature: 1.0e4
+  ood_p_value_threshold: null
+  checkpoint_path: null
+  gaussian_model_h5_path: null
+  calibration_h5_path: null
+  reward_camera: corner2
+  # Match these to the -r, --center-crop, and --crop-offset values used to
+  # generate the reward-model data. crop_size is (height, width); crop_offset
+  # is (left, top). Leave crop_size/offset null when no crop was used.
+  reward_render_size: 448
+  reward_crop_size: [224, 224]
+  reward_crop_offset: [56, 112]

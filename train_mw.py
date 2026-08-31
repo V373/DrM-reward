@@ -20,6 +20,7 @@ import metaworld_env as mw
 from logger import Logger
 from parallel_env import ParallelMetaWorld
 from replay_buffer import ReplayBufferStorage, make_replay_loader
+from shaped_reward import MetaWorldShapedRewardWrapper
 from video import TrainVideoRecorder, VideoRecorder
 import wandb
 import math
@@ -71,10 +72,38 @@ class Workspace:
         self.logger = Logger(self.work_dir,
                              use_tb=self.cfg.use_tb,
                              use_wandb=self.cfg.use_wandb)
+        shaped_cfg = self.cfg.get('shaped_reward', None)
+        self.shaped_reward_enabled = bool(
+            shaped_cfg is not None and shaped_cfg.get('enabled', False))
+        replay_discount = (
+            self._discount - self._discount_alpha - self._discount_beta)
+        if self.shaped_reward_enabled:
+            if self.cfg.reward_type != 'sparse':
+                raise ValueError(
+                    'shaped_reward requires reward_type=sparse')
+            if (str(shaped_cfg.get('type', 'pbrs')) == 'pbrs'
+                    and not math.isclose(
+                        float(shaped_cfg.get('pbrs_gamma', replay_discount)),
+                        replay_discount,
+                        rel_tol=0.0,
+                        abs_tol=1.0e-12)):
+                raise ValueError(
+                    'shaped_reward.pbrs_gamma must equal the replay discount '
+                    f'({replay_discount})')
         # create envs
+        reward_frame_kwargs = {}
+        if shaped_cfg is not None:
+            reward_frame_kwargs = {
+                'reward_render_size': shaped_cfg.get(
+                    'reward_render_size', 224),
+                'reward_crop_size': shaped_cfg.get('reward_crop_size', None),
+                'reward_crop_offset': shaped_cfg.get(
+                    'reward_crop_offset', None),
+            }
         self.train_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
                                   self.cfg.action_repeat, self.cfg.seed,
-                                  reward_type=self.cfg.reward_type)
+                                  reward_type=self.cfg.reward_type,
+                                  **reward_frame_kwargs)
         self.eval_env, self.eval_envs = None, None
         if self.cfg.num_eval_envs > 1:
             self.eval_envs = ParallelMetaWorld(self.cfg.task_name,
@@ -87,6 +116,10 @@ class Workspace:
             self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
                                      self.cfg.action_repeat, self.cfg.seed,
                                      reward_type=self.cfg.reward_type)
+        # Start evaluation workers before the shaped-reward model initializes CUDA.
+        if self.shaped_reward_enabled:
+            self.train_env = MetaWorldShapedRewardWrapper(
+                self.train_env, shaped_cfg, str(self.device))
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
@@ -285,6 +318,11 @@ class Workspace:
 
             # take env step
             time_step = self.train_env.step(action)
+            if self.shaped_reward_enabled:
+                self.logger.log_metrics(
+                    self.train_env.last_reward_metrics,
+                    self.global_frame,
+                    ty='train')
             episode_reward += time_step.reward
             self.replay_storage.add(time_step)
             #self.train_video_recorder.record(time_step.observation)

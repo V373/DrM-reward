@@ -1,4 +1,5 @@
 import os
+import operator
 import gym
 import numpy as np
 from dm_env import StepType, specs
@@ -7,6 +8,60 @@ import numpy as np
 from gym import spaces
 from typing import Any, NamedTuple
 from collections import deque
+
+
+def _integer_pair(value, name):
+    try:
+        first, second = value
+        return operator.index(first), operator.index(second)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{name} must be a two-element integer sequence, got {value!r}"
+        ) from error
+
+
+def configure_reward_frame_crop(render_size, crop_size=None, crop_offset=None):
+    """Validate reward-frame crop settings and return ``(top, left, bottom, right)``.
+
+    ``crop_size`` is ``(height, width)`` and ``crop_offset`` is ``(left, top)``,
+    matching ``training_data_gen.py``.
+    """
+    try:
+        render_size = operator.index(render_size)
+    except TypeError as error:
+        raise ValueError(
+            f"reward_render_size must be an integer, got {render_size!r}"
+        ) from error
+    if render_size <= 0:
+        raise ValueError("reward_render_size must be positive")
+    if crop_offset is not None and crop_size is None:
+        raise ValueError("reward_crop_offset requires reward_crop_size")
+    if crop_size is None:
+        return render_size, None
+
+    crop_height, crop_width = _integer_pair(crop_size, "reward_crop_size")
+    if crop_height <= 0 or crop_width <= 0:
+        raise ValueError("reward_crop_size values must both be positive")
+    if crop_offset is None:
+        top = (render_size - crop_height) // 2
+        left = (render_size - crop_width) // 2
+    else:
+        left, top = _integer_pair(crop_offset, "reward_crop_offset")
+        if left < 0 or top < 0:
+            raise ValueError(
+                f"reward_crop_offset values must both be non-negative, got "
+                f"{(left, top)}")
+    bottom = top + crop_height
+    right = left + crop_width
+    if top < 0 or left < 0 or bottom > render_size or right > render_size:
+        location = "centered" if crop_offset is None else (
+            f"left={left}, top={top}")
+        raise ValueError(
+            f"Reward crop {crop_height}x{crop_width} at {location} exceeds "
+            f"the {render_size}x{render_size} rendered frame")
+    return render_size, (top, left, bottom, right)
+
+
 class MetaWorld:
     def __init__(
         self,
@@ -15,6 +70,9 @@ class MetaWorld:
         action_repeat=1,
         size=(64, 64),
         camera=None,
+        reward_render_size=224,
+        reward_crop_size=None,
+        reward_crop_offset=None,
     ):
         import metaworld
         from metaworld.envs import (
@@ -32,6 +90,9 @@ class MetaWorld:
         self._action_repeat = action_repeat
 
         self._camera = camera
+        self._reward_render_size, self._reward_crop_box = (
+            configure_reward_frame_crop(
+                reward_render_size, reward_crop_size, reward_crop_offset))
 
     @property
     def obs_space(self):
@@ -50,6 +111,24 @@ class MetaWorld:
     def act_space(self):
         action = self._env.action_space
         return {"action": action}
+
+    def get_reward_frame(self, camera_name=None):
+        camera_name = camera_name or self._camera
+        frame = self._env.sim.render(
+            self._reward_render_size,
+            self._reward_render_size,
+            mode="offscreen",
+            camera_name=camera_name,
+        )
+        expected_shape = (
+            self._reward_render_size, self._reward_render_size, 3)
+        if frame.shape != expected_shape:
+            raise ValueError(
+                f"Expected a {expected_shape} RGB reward frame, got {frame.shape}")
+        if self._reward_crop_box is not None:
+            top, left, bottom, right = self._reward_crop_box
+            frame = frame[top:bottom, left:right]
+        return np.ascontiguousarray(frame, dtype=np.uint8)
 
     def step(self, action):
         assert np.isfinite(action["action"]).all(), action["action"]
@@ -255,6 +334,9 @@ class metaworld_wrapper():
                                   self._env.act_space['action'].high,
                                   'action')
 
+    def get_reward_frame(self, camera_name=None):
+        return self._env.get_reward_frame(camera_name)
+
     def reset(self):
         time_step = self._env.reset()
         obs = time_step['image']
@@ -286,8 +368,13 @@ class metaworld_wrapper():
                                  discount=1.0,
                                 success = time_step['success'])
 
-def make(name, frame_stack, action_repeat, seed, reward_type='dense'):
-    env = MetaWorld(name, seed,action_repeat, (84,84), 'corner2')
+def make(name, frame_stack, action_repeat, seed, reward_type='dense',
+         reward_render_size=224, reward_crop_size=None,
+         reward_crop_offset=None):
+    env = MetaWorld(name, seed, action_repeat, (84, 84), 'corner2',
+                    reward_render_size=reward_render_size,
+                    reward_crop_size=reward_crop_size,
+                    reward_crop_offset=reward_crop_offset)
     env = NormalizeAction(env)
     env = OuterRewardWrapper(env, reward_type)
     env = TimeLimit(env, 250)
