@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import shlex
 import subprocess
 import sys
@@ -16,43 +17,110 @@ from typing import List, Optional, Sequence, Tuple
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 CONDA_ENV = "drm-cu128"
 
-# The names on the right are the Hydra task-config names used by this project.
-# In particular, the existing configs are called soccer-meta, hammer-meta, and
-# disassemble even though the corresponding MetaWorld tasks are soccer, hammer,
-# and disassembly.
-TASKS: Tuple[Tuple[str, str], ...] = (
-    ("button press wall", "button-press-wall"),
-    ("coffee push", "coffee-push"),
-    ("soccer", "soccer-meta"),
-    ("window close", "window-close"),
-    ("drawer open", "drawer-open"),
-    ("sweep into", "sweep-into"),
-    ("door lock", "door-lock"),
-    ("hammer", "hammer-meta"),
-    ("assembly", "assembly"),
-    ("disassembly", "disassemble"),
+# Hydra task-config names used by this project.
+TASKS: Tuple[str, ...] = (
+    "button-press-wall",
+    "coffee-push",
+    "soccer-meta",
+    "window-close",
+    "drawer-open",
+    "sweep-into",
+    "door-lock",
+    "hammer-meta",
+    "assembly",
+    "disassemble",
 )
 REWARD_TYPES: Tuple[str, ...] = ("sparse", "dense")
 
+TERM_TIMEOUT_SECONDS = 10.0
+KILL_TIMEOUT_SECONDS = 5.0
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
-def wait_for_process_group(process_group: int) -> None:
-    """Wait until all descendants in an experiment's process group exit."""
+
+def wait_for_process_group(
+    process: subprocess.Popen,
+    timeout: float,
+) -> bool:
+    """Return whether the experiment leader and its process group exited."""
+
+    deadline = time.monotonic() + timeout
+    if process.poll() is None:
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
 
     while True:
         try:
-            os.killpg(process_group, 0)
+            os.killpg(process.pid, 0)
         except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.2, remaining))
+
+
+def terminate_process_group(process: subprocess.Popen) -> None:
+    """Stop an experiment and its workers, escalating if necessary."""
+
+    for signum, timeout in (
+        (signal.SIGTERM, TERM_TIMEOUT_SECONDS),
+        (signal.SIGKILL, KILL_TIMEOUT_SECONDS),
+    ):
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            process.poll()  # Reap the leader if it exited between checks.
             return
         except PermissionError:
-            # The group belongs to the child process started by this script;
-            # this should not normally happen, but it is safer to continue
-            # than to wait forever if the OS denies the probe.
+            print(
+                f"Could not signal process group {process.pid}: permission denied",
+                file=sys.stderr,
+                flush=True,
+            )
             return
-        time.sleep(1)
+
+        if wait_for_process_group(process, timeout):
+            return
+        if signum == signal.SIGTERM:
+            print(
+                f"Process group {process.pid} did not exit after SIGTERM; "
+                "sending SIGKILL.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    print(
+        f"Process group {process.pid} is still present after SIGKILL.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _handle_stop_signal(signum: int, _frame) -> None:
+    """Abort the loop; run_experiment's finally block cleans up workers."""
+
+    for stop_signal in STOP_SIGNALS:
+        signal.signal(stop_signal, signal.SIG_DFL)
+    print(
+        f"Received {signal.Signals(signum).name}; stopping.",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(128 + signum)
+
+
+def _install_signal_handlers() -> None:
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, _handle_stop_signal)
 
 
 def build_command(task_config: str, reward_type: str) -> List[str]:
-    """Build the same training command used by train_metaworld_serial.sh."""
+    """Build one MetaWorld training command."""
 
     return [
         "conda",
@@ -72,13 +140,9 @@ def build_command(task_config: str, reward_type: str) -> List[str]:
 def run_experiment(
     task_config: str,
     reward_type: str,
-    dry_run: bool = False,
 ) -> int:
     command = build_command(task_config, reward_type)
     print(f"Command: {shlex.join(command)}", flush=True)
-
-    if dry_run:
-        return 0
 
     try:
         process = subprocess.Popen(
@@ -90,61 +154,73 @@ def run_experiment(
         print(f"Could not start experiment: {error}", file=sys.stderr)
         return 127
 
-    # start_new_session=True creates a new session whose process group ID is
-    # the child's PID.  This also covers workers that outlive conda's launcher.
-    process_group = process.pid
-    return_code = process.wait()
-    wait_for_process_group(process_group)
-    return return_code
+    # A separate session lets cleanup address conda, train_mw.py, and all
+    # multiprocessing workers as one process group.
+    try:
+        return process.wait()
+    finally:
+        terminate_process_group(process)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    total = len(TASKS) * len(REWARD_TYPES)
     parser = argparse.ArgumentParser(
         description=(
-            "Run 10 MetaWorld tasks serially with both sparse and dense "
-            "rewards (20 experiments total)."
+            f"Run {len(TASKS)} MetaWorld tasks serially with both sparse and "
+            f"dense rewards ({total} experiments total)."
         )
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print all 20 commands without starting training.",
+        help=f"Print all {total} commands without starting training.",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    failed_experiments: List[str] = []
-    total = len(TASKS) * len(REWARD_TYPES)
-    experiment_number = 0
+    experiments = [
+        (task_config, reward_type)
+        for reward_type in REWARD_TYPES
+        for task_config in TASKS
+    ]
+    total = len(experiments)
 
-    for reward_type in REWARD_TYPES:
-        for display_name, task_config in TASKS:
-            experiment_number += 1
-            prefix = f"{reward_type.upper()}-"
-            label = f"{task_config} ({display_name}, {reward_type})"
+    if args.dry_run:
+        for task_config, reward_type in experiments:
+            print(shlex.join(build_command(task_config, reward_type)))
+        print(f"Dry run: printed {total} commands; no experiments were started.")
+        return 0
+
+    _install_signal_handlers()
+    failed_experiments: List[str] = []
+
+    for experiment_number, (task_config, reward_type) in enumerate(
+        experiments,
+        start=1,
+    ):
+        label = f"{task_config} ({reward_type})"
+        print(
+            f"========== Starting experiment "
+            f"{experiment_number}/{total}: {label} ==========",
+            flush=True,
+        )
+
+        status = run_experiment(task_config, reward_type)
+        if status == 0:
             print(
-                f"========== Starting experiment "
-                f"{experiment_number}/{total}: {label}; W&B prefix={prefix} "
-                f"==========",
+                f"========== Finished experiment "
+                f"{experiment_number}/{total}: {label} ==========",
                 flush=True,
             )
-
-            status = run_experiment(task_config, reward_type, args.dry_run)
-            if status == 0:
-                print(
-                    f"========== Finished experiment "
-                    f"{experiment_number}/{total}: {label} ==========",
-                    flush=True,
-                )
-            else:
-                failed_experiments.append(f"{label}(exit={status})")
-                print(
-                    f"========== Experiment failed with exit={status}; "
-                    "continuing ==========",
-                    flush=True,
-                )
+        else:
+            failed_experiments.append(f"{label} (exit={status})")
+            print(
+                f"========== Experiment failed with exit={status}; "
+                "continuing ==========",
+                flush=True,
+            )
 
     if failed_experiments:
         print(
@@ -154,7 +230,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 1
 
-    print("All 20 MetaWorld experiments finished successfully.")
+    print(f"All {total} MetaWorld experiments finished successfully.")
     return 0
 
 
