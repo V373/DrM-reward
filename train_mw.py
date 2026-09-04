@@ -75,6 +75,9 @@ class Workspace:
         shaped_cfg = self.cfg.get('shaped_reward', None)
         self.shaped_reward_enabled = bool(
             shaped_cfg is not None and shaped_cfg.get('enabled', False))
+        self.shaped_reward_camera = (
+            str(shaped_cfg.get('reward_camera', 'corner2'))
+            if shaped_cfg is not None else 'corner2')
         replay_discount = (
             self._discount - self._discount_alpha - self._discount_beta)
         if self.shaped_reward_enabled:
@@ -111,15 +114,21 @@ class Workspace:
                                               self.cfg.action_repeat,
                                               self.cfg.seed,
                                               self.cfg.num_eval_envs,
-                                              reward_type=self.cfg.reward_type)
+                                              reward_type=self.cfg.reward_type,
+                                              reward_frame_kwargs=(
+                                                  reward_frame_kwargs))
         else:
             self.eval_env = mw.make(self.cfg.task_name, self.cfg.frame_stack,
                                      self.cfg.action_repeat, self.cfg.seed,
-                                     reward_type=self.cfg.reward_type)
+                                     reward_type=self.cfg.reward_type,
+                                     **reward_frame_kwargs)
         # Start evaluation workers before the shaped-reward model initializes CUDA.
         if self.shaped_reward_enabled:
             self.train_env = MetaWorldShapedRewardWrapper(
                 self.train_env, shaped_cfg, str(self.device))
+        self.defer_replay_until_episode_end = bool(
+            self.shaped_reward_enabled
+            and self.train_env.requires_episode_finalize)
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
@@ -179,6 +188,30 @@ class Workspace:
         self.buffer.update_nstep(self.nstep)
         return
 
+    def _capture_eval_progress_video(self, episode):
+        return bool(
+            episode == 0
+            and self.shaped_reward_enabled
+            and self.cfg.save_video
+            and self.cfg.use_wandb)
+
+    def _eval_reward_frame(self):
+        if self.eval_envs is not None:
+            return self.eval_envs.get_reward_frame(
+                0, self.shaped_reward_camera)
+        return self.eval_env.get_reward_frame(self.shaped_reward_camera)
+
+    def _save_eval_media(self, file_name, reward_frames=None, success=None):
+        self.video_recorder.save(file_name)
+        if reward_frames is None:
+            return
+        try:
+            progress, is_ood = self.train_env.infer_episode_progress(reward_frames)
+            self.video_recorder.save_progress(
+                file_name, reward_frames, progress, success, is_ood)
+        except Exception as exc:
+            print(f'[eval] failed to create progress video: {exc}')
+
     def eval(self):
         eval_start = time.time()
         if self.eval_envs is not None:
@@ -190,6 +223,10 @@ class Workspace:
         while eval_until_episode(episode):
             episode_sr = False
             time_step = self.eval_env.reset()
+            capture_progress = self._capture_eval_progress_video(episode)
+            reward_frames = (
+                [self._eval_reward_frame()] if capture_progress else None)
+            success_trace = [] if capture_progress else None
             self.video_recorder.init_obs(time_step.observation,
                                          enabled=(episode == 0))
             while not time_step.last():
@@ -200,13 +237,17 @@ class Workspace:
                                             eval_mode=True)
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record_obs(time_step.observation)
+                if capture_progress:
+                    reward_frames.append(self._eval_reward_frame())
+                    success_trace.append(float(time_step.success))
                 episode_sr = episode_sr or time_step.success
                 total_reward += time_step.reward
                 step += 1
 
             total_sr += episode_sr
             episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+            self._save_eval_media(
+                f'{self.global_frame}.mp4', reward_frames, success_trace)
 
         self._log_eval(step, episode, total_reward, total_sr, eval_start)
 
@@ -218,6 +259,10 @@ class Workspace:
             # only the first `keep` envs count when n does not divide the total
             keep = min(n, self.cfg.num_eval_episodes - episode)
             obs, _, _, _ = self.eval_envs.reset()
+            capture_progress = self._capture_eval_progress_video(episode)
+            reward_frames = (
+                [self._eval_reward_frame()] if capture_progress else None)
+            success_trace = [] if capture_progress else None
             self.video_recorder.init_obs(obs[0], enabled=(episode == 0))
             ep_reward = np.zeros(n, dtype=np.float64)
             ep_sr = np.zeros(n, dtype=bool)
@@ -229,6 +274,9 @@ class Workspace:
                                                   eval_mode=True)
                 obs, reward, success, last = self.eval_envs.step(action)
                 self.video_recorder.record_obs(obs[0])
+                if capture_progress:
+                    reward_frames.append(self._eval_reward_frame())
+                    success_trace.append(float(success[0]))
                 ep_sr |= success
                 ep_reward += reward
                 step += keep
@@ -236,7 +284,8 @@ class Workspace:
             total_reward += ep_reward[:keep].sum()
             total_sr += ep_sr[:keep].sum()
             episode += keep
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+            self._save_eval_media(
+                f'{self.global_frame}.mp4', reward_frames, success_trace)
 
         self._log_eval(step, episode, total_reward, total_sr, eval_start)
 
@@ -260,8 +309,13 @@ class Workspace:
                                       self.cfg.action_repeat)
 
         episode_step, episode_reward, episode_sr = 0, 0, False
+        episode_pending = []
+        episode_start_step = self.global_step
         time_step = self.train_env.reset()
-        self.replay_storage.add(time_step)
+        if self.defer_replay_until_episode_end:
+            episode_pending.append(time_step)
+        else:
+            self.replay_storage.add(time_step)
         # self.train_video_recorder.init(time_step.observation)
         metrics = None
         progress_bar = tqdm(total=self.cfg.num_train_frames,
@@ -276,7 +330,14 @@ class Workspace:
 
                 # reset env
                 time_step = self.train_env.reset()
-                self.replay_storage.add(time_step)                # wait until all the metrics schema is populated
+                if self.defer_replay_until_episode_end:
+                    if episode_pending:
+                        raise RuntimeError(
+                            'Pending episode was not cleared after finalization')
+                    episode_start_step = self.global_step
+                    episode_pending.append(time_step)
+                else:
+                    self.replay_storage.add(time_step)             # wait until all the metrics schema is populated
                 if metrics is not None:
                     # log stats
                     elapsed_time, total_time = self.timer.reset()
@@ -320,13 +381,33 @@ class Workspace:
 
             # take env step
             time_step = self.train_env.step(action)
-            if self.shaped_reward_enabled:
-                self.logger.log_metrics(
-                    self.train_env.last_reward_metrics,
-                    self.global_frame,
-                    ty='train')
-            episode_reward += time_step.reward
-            self.replay_storage.add(time_step)
+            if self.defer_replay_until_episode_end:
+                episode_pending.append(time_step)
+                if time_step.last():
+                    finalized_episode, reward_metrics = (
+                        self.train_env.finalize_episode(episode_pending))
+                    if len(reward_metrics) != len(finalized_episode) - 1:
+                        raise RuntimeError(
+                            'Finalized reward count does not match episode length')
+                    for finalized_time_step in finalized_episode:
+                        self.replay_storage.add(finalized_time_step)
+                    for index, step_metrics in enumerate(reward_metrics):
+                        metric_frame = (
+                            episode_start_step + index) * self.cfg.action_repeat
+                        self.logger.log_metrics(
+                            step_metrics, metric_frame, ty='train')
+                    episode_reward += sum(
+                        float(item.reward) for item in finalized_episode[1:])
+                    time_step = finalized_episode[-1]
+                    episode_pending.clear()
+            else:
+                if self.shaped_reward_enabled:
+                    self.logger.log_metrics(
+                        self.train_env.last_reward_metrics,
+                        self.global_frame,
+                        ty='train')
+                episode_reward += time_step.reward
+                self.replay_storage.add(time_step)
             #self.train_video_recorder.record(time_step.observation)
             episode_step += 1
             self._global_step += 1

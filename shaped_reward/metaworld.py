@@ -72,7 +72,12 @@ class MetaWorldShapedRewardManager:
             posterior_temperature=float(
                 cfg.get("posterior_temperature", 1.0e4)),
             frame_history_stride=int(cfg.get("frame_history_stride", 4)),
+            enable_ood_filter=cfg.get("enable_ood_filter", False),
+            ood_filter_max_gap=cfg.get("ood_filter_max_gap", None),
+            ood_filter_min_ood_run=cfg.get(
+                "ood_filter_min_ood_run", None),
         )
+        self.enable_ood_filter = self.provider.enable_ood_filter
 
     def reset(self, frame):
         progress = float(self.provider.reset_all([frame])[0])
@@ -80,14 +85,10 @@ class MetaWorldShapedRewardManager:
             raise ValueError("Initial progress is NaN or Inf")
         return progress
 
-    def step(self, sparse_reward, next_frame, done):
-        if self.provider.progress_current is None:
-            raise RuntimeError("Shaped reward manager must be reset before step")
-
+    def _compute_reward(self, sparse_reward, progress, inferred_next, done):
         sparse_reward = float(sparse_reward)
-        progress = float(self.provider.progress_current[0])
-        inferred_next = float(self.provider.advance_all(
-            [next_frame], reset_mask=np.array([False]))[0])
+        progress = float(progress)
+        inferred_next = float(inferred_next)
         if not all(np.isfinite(value) for value in (
                 sparse_reward, progress, inferred_next)):
             raise ValueError("Sparse reward and progress values must be finite")
@@ -122,15 +123,81 @@ class MetaWorldShapedRewardManager:
         }
         return float(shaped_reward), metrics
 
+    def step(self, sparse_reward, next_frame, done):
+        if self.enable_ood_filter:
+            raise RuntimeError(
+                "step() is unavailable when episode finalization is enabled")
+        if self.provider.progress_current is None:
+            raise RuntimeError("Shaped reward manager must be reset before step")
+
+        progress = float(self.provider.progress_current[0])
+        inferred_next = float(self.provider.advance_all(
+            [next_frame], reset_mask=np.array([False]))[0])
+        return self._compute_reward(
+            sparse_reward, progress, inferred_next, done)
+
+    def advance(self, next_frame):
+        if not self.enable_ood_filter:
+            raise RuntimeError(
+                "advance() requires episode finalization to be enabled")
+        if self.provider.progress_current is None:
+            raise RuntimeError("Shaped reward manager must be reset before advance")
+        progress = float(self.provider.advance_all(
+            [next_frame], reset_mask=np.array([False]))[0])
+        if not np.isfinite(progress):
+            raise ValueError("Progress is NaN or Inf")
+        return progress
+
+    def finalize_episode(self, sparse_rewards, dones):
+        if not self.enable_ood_filter:
+            raise RuntimeError(
+                "finalize_episode() requires enable_ood_filter=true")
+        sparse_rewards = np.asarray(sparse_rewards, dtype=np.float64)
+        dones = np.asarray(dones, dtype=np.bool_)
+        if sparse_rewards.ndim != 1 or dones.ndim != 1:
+            raise ValueError("sparse_rewards and dones must be one-dimensional")
+        if sparse_rewards.size == 0 or sparse_rewards.shape != dones.shape:
+            raise ValueError(
+                "sparse_rewards and dones must have the same non-empty shape")
+        if not np.isfinite(sparse_rewards).all():
+            raise ValueError("Sparse rewards contain NaN or Inf")
+
+        progress_final = np.asarray(
+            self.provider.finalize_episode(), dtype=np.float64)
+        if progress_final.ndim != 1 or progress_final.size != sparse_rewards.size + 1:
+            raise ValueError(
+                "Finalized progress length must equal transition count plus one")
+        if not np.isfinite(progress_final).all():
+            raise ValueError("Finalized progress contains NaN or Inf")
+
+        rewards = []
+        metrics = []
+        for index, sparse_reward in enumerate(sparse_rewards):
+            reward, step_metrics = self._compute_reward(
+                sparse_reward=sparse_reward,
+                progress=progress_final[index],
+                inferred_next=progress_final[index + 1],
+                done=bool(dones[index]))
+            rewards.append(reward)
+            metrics.append(step_metrics)
+        return rewards, metrics
+
+    def infer_episode_progress(self, frames):
+        return self.provider.infer_episode_trace(frames)
+
 
 class MetaWorldShapedRewardWrapper:
-    """Replace a single MetaWorld training env's sparse reward online."""
+    """Replace a single MetaWorld training env's sparse reward."""
 
     def __init__(self, env, cfg, device, manager=None):
         self._env = env
         self._camera = str(cfg.get("reward_camera", "corner2"))
         self._manager = manager or MetaWorldShapedRewardManager(cfg, device)
         self.last_reward_metrics = {}
+
+    @property
+    def requires_episode_finalize(self):
+        return bool(getattr(self._manager, "enable_ood_filter", False))
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -145,8 +212,46 @@ class MetaWorldShapedRewardWrapper:
 
     def step(self, action):
         time_step = self._env.step(action)
+        next_frame = self._env.get_reward_frame(self._camera)
+        if self.requires_episode_finalize:
+            self._manager.advance(next_frame)
+            self.last_reward_metrics = {}
+            return time_step
         reward, self.last_reward_metrics = self._manager.step(
             sparse_reward=time_step.reward,
-            next_frame=self._env.get_reward_frame(self._camera),
+            next_frame=next_frame,
             done=time_step.last())
         return time_step._replace(reward=reward)
+
+    def finalize_episode(self, episode_pending):
+        if not self.requires_episode_finalize:
+            raise RuntimeError(
+                "finalize_episode() requires enable_ood_filter=true")
+        episode_pending = list(episode_pending)
+        if len(episode_pending) < 2:
+            raise ValueError("Pending episode must contain FIRST and LAST timesteps")
+        if not episode_pending[0].first():
+            raise ValueError("Pending episode must start with a FIRST timestep")
+        if any(time_step.first() for time_step in episode_pending[1:]):
+            raise ValueError("Pending episode contains an unexpected FIRST timestep")
+        if not episode_pending[-1].last():
+            raise ValueError("Pending episode must end with a LAST timestep")
+        if any(time_step.last() for time_step in episode_pending[1:-1]):
+            raise ValueError("Pending episode contains an early LAST timestep")
+
+        transitions = episode_pending[1:]
+        rewards, metrics = self._manager.finalize_episode(
+            sparse_rewards=[time_step.reward for time_step in transitions],
+            dones=[time_step.last() for time_step in transitions])
+        if len(rewards) != len(transitions) or len(metrics) != len(transitions):
+            raise RuntimeError(
+                "Finalized rewards and metrics must match transition count")
+        finalized_episode = [episode_pending[0]]
+        finalized_episode.extend(
+            time_step._replace(reward=reward)
+            for time_step, reward in zip(transitions, rewards))
+        self.last_reward_metrics = metrics[-1]
+        return finalized_episode, metrics
+
+    def infer_episode_progress(self, frames):
+        return self._manager.infer_episode_progress(frames)

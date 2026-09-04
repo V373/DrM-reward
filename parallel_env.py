@@ -9,7 +9,8 @@ import multiprocessing as mp
 import numpy as np
 
 
-def _worker(conn, task_name, frame_stack, action_repeat, seed, reward_type):
+def _worker(conn, task_name, frame_stack, action_repeat, seed, reward_type,
+            reward_frame_kwargs):
     import metaworld_env as mw
 
     # MetaWorld's _get_state_rand_vec draws from the global numpy RNG, not the
@@ -17,7 +18,8 @@ def _worker(conn, task_name, frame_stack, action_repeat, seed, reward_type):
     # same task sequence.
     np.random.seed(seed)
     env = mw.make(task_name, frame_stack, action_repeat, seed,
-                  reward_type=reward_type)
+                  reward_type=reward_type,
+                  **reward_frame_kwargs)
     conn.send(env.action_spec().shape)
     try:
         while True:
@@ -28,6 +30,8 @@ def _worker(conn, task_name, frame_stack, action_repeat, seed, reward_type):
             elif cmd == 'step':
                 ts = env.step(data)
                 conn.send((ts.observation, ts.reward, ts.success, ts.last()))
+            elif cmd == 'get_reward_frame':
+                conn.send(env.get_reward_frame(data))
             elif cmd == 'close':
                 return
     except (KeyboardInterrupt, EOFError):
@@ -40,7 +44,8 @@ class ParallelMetaWorld:
     """Runs `num_envs` MetaWorld envs in worker processes, one pipe each."""
 
     def __init__(self, task_name, frame_stack, action_repeat, base_seed,
-                 num_envs, reward_type='dense', start_method='forkserver'):
+                 num_envs, reward_type='dense', start_method='forkserver',
+                 reward_frame_kwargs=None):
         try:
             ctx = mp.get_context(start_method)
         except ValueError:
@@ -50,12 +55,13 @@ class ParallelMetaWorld:
         self._conns = []
         self._procs = []
         self._closed = False
+        reward_frame_kwargs = dict(reward_frame_kwargs or {})
         for rank in range(num_envs):
             parent, child = ctx.Pipe()
             proc = ctx.Process(target=_worker,
                                args=(child, task_name, frame_stack,
                                      action_repeat, base_seed + rank,
-                                     reward_type),
+                                     reward_type, reward_frame_kwargs),
                                daemon=True)
             proc.start()
             child.close()
@@ -82,6 +88,13 @@ class ParallelMetaWorld:
         for c, a in zip(self._conns, actions):
             c.send(('step', a))
         return self._gather()
+
+    def get_reward_frame(self, env_index=0, camera_name=None):
+        if not 0 <= env_index < self.num_envs:
+            raise IndexError(f'env_index out of range: {env_index}')
+        conn = self._conns[env_index]
+        conn.send(('get_reward_frame', camera_name))
+        return conn.recv()
 
     def close(self):
         if self._closed:

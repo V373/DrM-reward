@@ -1,8 +1,16 @@
-num_train_frames: 2100000
+num_train_frames: 2100000 # default 2100000
 nstep_alpha_temp: 1000000
 discount_alpha_temp: 500000
 discount_beta_temp: 1600000
 stddev_schedule: 'linear(1.0,0.1,500000)'
+# Discount schedule inherited from the DrM MetaWorld configuration:
+#   gamma(t) = discount
+#              - discount_alpha * exp(-t / discount_alpha_temp)
+#              - discount_beta * exp(-t / discount_beta_temp)
+# It was intended to increase from 0.97 at t=0 toward 0.997 asymptotically.
+# This schedule is not applied by the current training path: ReplayBuffer is
+# initialized once with 0.997 - 0.02 - 0.007 = 0.97, so the critic uses a
+# fixed per-transition discount of 0.97.
 discount: 0.997
 discount_alpha: 0.02
 discount_beta: 0.007
@@ -14,6 +22,9 @@ shaped_reward:
   enabled: false
   type: pbrs
   frame_history_stride: 4
+  enable_ood_filter: false
+  ood_filter_max_gap: null
+  ood_filter_min_ood_run: null
   sparse_scale: 1.0
   pbrs_gamma: 0.97
   pbrs_dense_scale: 1.0

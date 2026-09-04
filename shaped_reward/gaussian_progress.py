@@ -266,6 +266,65 @@ def _read_calibration_bins(path, model):
     return [np.concatenate(parts) for parts in per_bin]
 
 
+def _filter_is_ood_short_id_gaps(is_ood, max_gap, min_ood_run):
+    """Fill short internal ID gaps bounded by sufficiently long OOD runs."""
+    raw_is_ood = np.asarray(is_ood)
+    if raw_is_ood.ndim != 1 or raw_is_ood.dtype != np.dtype("bool"):
+        raise ValueError("is_ood must be a one-dimensional boolean array")
+    for name, value in (("max_gap", max_gap), ("min_ood_run", min_ood_run)):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, np.integer)) or int(value) < 1:
+            raise ValueError(f"{name} must be a positive integer")
+
+    max_gap = int(max_gap)
+    min_ood_run = int(min_ood_run)
+    filtered_is_ood = raw_is_ood.copy()
+    num_steps = int(raw_is_ood.size)
+    index = 0
+    left_ood_run = 0
+
+    while index < num_steps:
+        if raw_is_ood[index]:
+            run_start = index
+            while index < num_steps and raw_is_ood[index]:
+                index += 1
+            left_ood_run = index - run_start
+            continue
+
+        gap_start = index
+        while index < num_steps and not raw_is_ood[index]:
+            index += 1
+        gap_end = index
+
+        if gap_start == 0 or gap_end == num_steps:
+            left_ood_run = 0
+            continue
+
+        right_run_start = index
+        while index < num_steps and raw_is_ood[index]:
+            index += 1
+        right_ood_run = index - right_run_start
+
+        if (gap_end - gap_start <= max_gap
+                and left_ood_run >= min_ood_run
+                and right_ood_run >= min_ood_run):
+            filtered_is_ood[gap_start:gap_end] = True
+        left_ood_run = right_ood_run
+
+    return filtered_is_ood
+
+
+def _compute_progress_gated(progress_mean, is_ood):
+    """Hold the last in-distribution progress across OOD frames."""
+    progress_gated = np.empty_like(progress_mean)
+    last_progress = 0.0
+    for frame_index in range(progress_mean.shape[0]):
+        if not is_ood[frame_index]:
+            last_progress = progress_mean[frame_index]
+        progress_gated[frame_index] = last_progress
+    return progress_gated
+
+
 class BatchedGaussianProgressGatedProvider:
     """Infer OOD-gated progress for one or more online environments."""
 
@@ -282,7 +341,10 @@ class BatchedGaussianProgressGatedProvider:
             *,
             ood_p_value_threshold,
             posterior_temperature=1.0e4,
-            frame_history_stride=4):
+            frame_history_stride=4,
+            enable_ood_filter=False,
+            ood_filter_max_gap=None,
+            ood_filter_min_ood_run=None):
         self.n_envs = int(n_envs)
         if self.n_envs < 1:
             raise ValueError("n_envs must be >= 1")
@@ -293,6 +355,26 @@ class BatchedGaussianProgressGatedProvider:
         self.frame_history_stride = int(frame_history_stride)
         if self.frame_history_stride < 1:
             raise ValueError("frame_history_stride must be >= 1")
+        if not isinstance(enable_ood_filter, (bool, np.bool_)):
+            raise ValueError("enable_ood_filter must be boolean")
+        self.enable_ood_filter = bool(enable_ood_filter)
+        if self.enable_ood_filter:
+            filter_values = {
+                "ood_filter_max_gap": ood_filter_max_gap,
+                "ood_filter_min_ood_run": ood_filter_min_ood_run,
+            }
+            for name, value in filter_values.items():
+                if isinstance(value, (bool, np.bool_)) or not isinstance(
+                        value, (int, np.integer)) or int(value) < 1:
+                    raise ValueError(
+                        f"{name} must be a positive integer when "
+                        "enable_ood_filter=true")
+            self.ood_filter_max_gap = int(filter_values["ood_filter_max_gap"])
+            self.ood_filter_min_ood_run = int(
+                filter_values["ood_filter_min_ood_run"])
+        else:
+            self.ood_filter_max_gap = None
+            self.ood_filter_min_ood_run = None
         if not np.isfinite(self.posterior_temperature) \
                 or self.posterior_temperature <= 0.0:
             raise ValueError("posterior_temperature must be finite and > 0")
@@ -323,6 +405,12 @@ class BatchedGaussianProgressGatedProvider:
             self.n_envs, dtype=torch.long, device=self.device)
         self._last_in_distribution = torch.zeros(
             self.n_envs, dtype=torch.float64, device=self.device)
+        self._last_is_ood = torch.zeros(
+            self.n_envs, dtype=torch.bool, device=self.device)
+        self._episode_progress_raw_by_env = [
+            [] for _ in range(self.n_envs)]
+        self._episode_is_ood_raw_by_env = [
+            [] for _ in range(self.n_envs)]
         self.progress_current = None
 
     def _build_encoder(self):
@@ -436,7 +524,28 @@ class BatchedGaussianProgressGatedProvider:
         is_ood = (p_values < self.ood_p_value_threshold).all(dim=1)
         self._last_in_distribution = torch.where(
             is_ood, self._last_in_distribution, progress)
-        return self._last_in_distribution
+        self._last_is_ood = is_ood
+        return self._last_in_distribution, progress, is_ood
+
+    def _finalize_trace(self, progress_raw, is_ood_raw):
+        if not self.enable_ood_filter:
+            raise RuntimeError(
+                "finalize_episode() requires enable_ood_filter=true")
+        if not progress_raw:
+            raise RuntimeError(
+                "Episode trace is empty; reset the provider before finalizing")
+        if len(progress_raw) != len(is_ood_raw):
+            raise RuntimeError(
+                "Episode progress and OOD traces have different lengths")
+
+        progress_raw = np.asarray(progress_raw, dtype=np.float64)
+        is_ood_raw = np.asarray(is_ood_raw, dtype=np.bool_)
+        is_ood_final = _filter_is_ood_short_id_gaps(
+            is_ood_raw,
+            max_gap=self.ood_filter_max_gap,
+            min_ood_run=self.ood_filter_min_ood_run)
+        progress_final = _compute_progress_gated(progress_raw, is_ood_final)
+        return progress_final, is_ood_final
 
     def advance_all(self, frames, reset_mask=None):
         if reset_mask is None:
@@ -453,6 +562,10 @@ class BatchedGaussianProgressGatedProvider:
 
         with torch.inference_mode():
             is_reset = torch.as_tensor(reset, device=self.device)
+            if self.enable_ood_filter:
+                for env_index in np.flatnonzero(reset):
+                    self._episode_progress_raw_by_env[int(env_index)].clear()
+                    self._episode_is_ood_raw_by_env[int(env_index)].clear()
             self._head = (self._head + 1) % self.history_len
             self._since_reset = torch.where(
                 is_reset,
@@ -463,10 +576,90 @@ class BatchedGaussianProgressGatedProvider:
                 torch.zeros_like(self._last_in_distribution),
                 self._last_in_distribution)
             self._frame_ring[self._env_indices, self._head] = self._write_frames(frames)
-            self.progress_current = self._infer_batch().cpu().numpy()
+            inferred_progress, progress_raw, is_ood_raw = self._infer_batch()
+            if self.enable_ood_filter:
+                progress_raw = progress_raw.cpu().numpy()
+                is_ood_raw = is_ood_raw.cpu().numpy()
+                for env_index in range(self.n_envs):
+                    self._episode_progress_raw_by_env[env_index].append(
+                        float(progress_raw[env_index]))
+                    self._episode_is_ood_raw_by_env[env_index].append(
+                        bool(is_ood_raw[env_index]))
+            self.progress_current = inferred_progress.cpu().numpy()
         return self.progress_current
 
     def reset_all(self, frames):
         self.progress_current = None
         return self.advance_all(
             frames, reset_mask=np.ones(self.n_envs, dtype=bool))
+
+    def finalize_episode(self, env_index=None):
+        """Finalize one environment's complete progress trajectory."""
+        if env_index is None:
+            if self.n_envs != 1:
+                raise ValueError(
+                    "env_index is required when finalizing a multi-env provider")
+            env_index = 0
+        if isinstance(env_index, (bool, np.bool_)) or not isinstance(
+                env_index, (int, np.integer)):
+            raise ValueError("env_index must be an integer")
+        env_index = int(env_index)
+        if env_index < 0 or env_index >= self.n_envs:
+            raise ValueError(
+                f"env_index must be in [0, {self.n_envs}), got {env_index}")
+        progress_final, _ = self._finalize_trace(
+            self._episode_progress_raw_by_env[env_index],
+            self._episode_is_ood_raw_by_env[env_index])
+        return progress_final
+
+    def infer_episode_trace(self, frames):
+        """Infer transition progress without changing the online state."""
+        if self.n_envs != 1:
+            raise ValueError("Episode trace inference requires n_envs=1")
+        frames = list(frames)
+        if not frames:
+            raise ValueError("Episode trace inference requires an initial frame")
+
+        saved_frame_ring = self._frame_ring.clone()
+        saved_head = self._head.clone()
+        saved_since_reset = self._since_reset.clone()
+        saved_last_in_distribution = self._last_in_distribution.clone()
+        saved_last_is_ood = self._last_is_ood.clone()
+        saved_progress_raw = [
+            list(trace) for trace in self._episode_progress_raw_by_env]
+        saved_is_ood_raw = [
+            list(trace) for trace in self._episode_is_ood_raw_by_env]
+        saved_progress = (
+            None if self.progress_current is None
+            else np.array(self.progress_current, copy=True))
+        try:
+            current = self.reset_all([frames[0]])
+            trace = []
+            ood_trace = []
+            for frame in frames[1:]:
+                trace.append(float(current[0]))
+                ood_trace.append(bool(self._last_is_ood[0].item()))
+                current = self.advance_all([frame])
+            if self.enable_ood_filter:
+                progress_final, is_ood_final = self._finalize_trace(
+                    self._episode_progress_raw_by_env[0],
+                    self._episode_is_ood_raw_by_env[0])
+                return (
+                    np.asarray(progress_final[:-1], dtype=np.float32),
+                    np.asarray(is_ood_final[:-1], dtype=bool),
+                )
+            return (
+                np.asarray(trace, dtype=np.float32),
+                np.asarray(ood_trace, dtype=bool),
+            )
+        finally:
+            with torch.inference_mode():
+                self._frame_ring.copy_(saved_frame_ring)
+                self._head.copy_(saved_head)
+                self._since_reset.copy_(saved_since_reset)
+                self._last_in_distribution.copy_(
+                    saved_last_in_distribution)
+                self._last_is_ood.copy_(saved_last_is_ood)
+            self._episode_progress_raw_by_env = saved_progress_raw
+            self._episode_is_ood_raw_by_env = saved_is_ood_raw
+            self.progress_current = saved_progress

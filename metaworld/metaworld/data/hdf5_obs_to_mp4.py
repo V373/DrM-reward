@@ -170,8 +170,8 @@ def write_trajectory_video(
             f"Expected RGB observations with shape (T, H, W, 3), got "
             f"{observations.shape} in {observations.name}"
         )
-    if observations.shape[0] == 0:
-        print(f"  skip empty trajectory: {observations.parent.name}")
+    if observations.shape[0] <= 1:
+        print(f"  skip trajectory without frames after dropping first: {observations.parent.name}")
         return False
     if output_path.exists() and not overwrite:
         print(f"  exists, skipping: {output_path.name}")
@@ -200,7 +200,9 @@ def write_trajectory_video(
             pixelformat="yuv420p",
             macro_block_size=None,
         ) as writer:
-            for frame_index in range(observations.shape[0]):
+            # The first saved observation is the reset-state frame; omit it
+            # from exported rollout videos.
+            for frame_index in range(1, observations.shape[0]):
                 frame = observations[frame_index]
                 if frame.dtype != np.uint8:
                     frame = np.clip(frame, 0, 255).astype(np.uint8)
@@ -214,7 +216,7 @@ def write_trajectory_video(
         temporary_path.unlink(missing_ok=True)
         raise
 
-    print(f"  wrote {output_path.name} ({observations.shape[0]} frames, {fps} fps)")
+    print(f"  wrote {output_path.name} ({observations.shape[0] - 1} frames, {fps} fps)")
     return True
 
 
