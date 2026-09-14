@@ -1,0 +1,2 @@
+shaped_reward/assets/**/*.pt filter=lfs diff=lfs merge=lfs -text
+shaped_reward/assets/**/*.h5 filter=lfs diff=lfs merge=lfs -text

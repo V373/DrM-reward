@@ -26,11 +26,17 @@ repository in editable mode. Run these commands from the repository root:
 ```bash
 conda env create -f conda_env.yml
 conda activate drm-cu128
+git lfs install
+git lfs pull
 pip install -e ./metaworld
 pip install -e ./rrl-dependencies
 pip install -e ./rrl-dependencies/mj_envs
 pip install -e ./rrl-dependencies/mjrl
 ```
+
+The PBRS task configurations require the tracked checkpoints and H5 assets in
+`shaped_reward/assets/`; Git LFS downloads them with `git lfs pull`. Sparse
+and dense reward runs do not load these assets.
 
 `free-mujoco-py` compiles its extension when it is first imported. For GPU
 off-screen rendering, verify that the generated module is the Linux GPU

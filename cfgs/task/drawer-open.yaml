@@ -31,9 +31,9 @@ shaped_reward:
 
   posterior_temperature: 1.0e4
   ood_p_value_threshold: 0.05
-  checkpoint_path: /home/user/zhangzk/projects/fineprog/checkpoint/COMPOSITE_TCC_TEMPORAL_TRIPLET-drawer-open-v2-36vid_train-resnet50_conv4c-only_bn-20260903-155520/encoder_epoch020000.pt
-  gaussian_model_h5_path: /home/user/zhangzk/projects/fineprog/outputs/gaussian_progress_fitting/COMPOSITE_TCC_TEMPORAL_TRIPLET-drawer-open-v2-36vid_train-resnet50_conv4c-only_bn-20260903-155520/drawer-open-v2-36vid_train-embd/20260907-002032/gaussian_progress_model-covariance_mode-independent-20260907-002032.h5
-  calibration_h5_path: /home/user/zhangzk/projects/fineprog/datasets/embeddings/COMPOSITE_TCC_TEMPORAL_TRIPLET-drawer-open-v2-36vid_train-resnet50_conv4c-only_bn-20260903-155520/drawer-open-v2-20vid_valid-embd.h5
+  checkpoint_path: shaped_reward/assets/drawer-open/encoder_epoch020000.pt
+  gaussian_model_h5_path: shaped_reward/assets/drawer-open/gaussian_progress_model.h5
+  calibration_h5_path: shaped_reward/assets/drawer-open/calibration_embeddings.h5
   reward_camera: corner2
   reward_render_size: 448
   reward_crop_size: [224, 224]
