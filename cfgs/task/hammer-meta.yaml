@@ -3,3 +3,38 @@ defaults:
   - _self_
 
 task_name: hammer
+
+discount: 0.995
+discount_alpha: 0
+discount_beta: 0
+nstep: 3
+nstep_alpha: 0
+
+shaped_reward:
+  enabled: true
+  type: pbrs
+  frame_history_stride: 4
+
+  enable_ood_filter: false
+  ood_filter_max_gap: 5
+  ood_filter_min_ood_run: 20
+
+  sparse_scale: 1.0
+  pbrs_gamma: 0.995
+  pbrs_dense_scale: 1.0
+
+  pbrs_progress_bias_enabled: false
+  pbrs_progress_bias_b: 0.0
+
+  pbrs_progress_exp_enabled: false
+  pbrs_progress_exp_base: 32.0
+
+  posterior_temperature: 1.0e4
+  ood_p_value_threshold: 0.05
+  checkpoint_path: /home/user/zhangzk/projects/fineprog/checkpoint/COMPOSITE_TCC_TEMPORAL_TRIPLET-hammer-v2-36vid_train-resnet50_conv4c-only_bn-20260905-185347/encoder_epoch020000.pt
+  gaussian_model_h5_path: /home/user/zhangzk/projects/fineprog/outputs/gaussian_progress_fitting/COMPOSITE_TCC_TEMPORAL_TRIPLET-hammer-v2-36vid_train-resnet50_conv4c-only_bn-20260905-185347/hammer-v2-36vid_train-embd/20260907-011446/gaussian_progress_model-covariance_mode-independent-20260907-011446.h5
+  calibration_h5_path: /home/user/zhangzk/projects/fineprog/datasets/embeddings/COMPOSITE_TCC_TEMPORAL_TRIPLET-hammer-v2-36vid_train-resnet50_conv4c-only_bn-20260905-185347/hammer-v2-20vid_valid-embd.h5
+  reward_camera: corner2
+  reward_render_size: 448
+  reward_crop_size: [224, 224]
+  reward_crop_offset: [56, 112]

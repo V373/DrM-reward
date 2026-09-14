@@ -4,21 +4,23 @@ defaults:
 
 task_name: assembly
 
-discount: 0.997
-discount_alpha: 0.02
-discount_beta: 0.007
+discount: 0.995
+discount_alpha: 0
+discount_beta: 0
+nstep: 3
+nstep_alpha: 0
 
 shaped_reward:
   enabled: true
   type: pbrs
   frame_history_stride: 4
 
-  enable_ood_filter: true
+  enable_ood_filter: false
   ood_filter_max_gap: 5
   ood_filter_min_ood_run: 20
 
   sparse_scale: 1.0
-  pbrs_gamma: 0.97
+  pbrs_gamma: 0.995
   pbrs_dense_scale: 1.0
 
   pbrs_progress_bias_enabled: false

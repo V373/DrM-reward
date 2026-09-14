@@ -43,8 +43,10 @@ class Workspace:
         print(f'workspace: {self.work_dir}')
         self.cfg = cfg
         if self.cfg.use_wandb:
-            exp_name = '_'.join([cfg.task_name, str(cfg.seed)])
-            exp_name = f'{cfg.wandb_run_name_prefix}{exp_name}'
+            exp_name = str(cfg.get('wandb_run_name', '')).strip()
+            if not exp_name:
+                exp_name = '_'.join([cfg.task_name, str(cfg.seed)])
+                exp_name = f'{cfg.wandb_run_name_prefix}{exp_name}'
             group_name = re.search(r'\.(.+)\.', cfg.agent._target_).group(1)
             wandb.init(project="DrM",
                        group=group_name,

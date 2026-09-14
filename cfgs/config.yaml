@@ -20,6 +20,7 @@ save_snapshot: false
 # wandb
 use_wandb: true
 wandb_run_name_prefix: ''
+wandb_run_name: ''
 # replay buffer
 replay_buffer_size: 1000000 # ~21 GiB for MetaWorld (per-frame storage, was 59 GiB stacked)
 replay_buffer_num_workers: 4
@@ -39,7 +40,12 @@ feature_dim: 50
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${hydra.job.override_dirname}
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${hydra:runtime.choices.task}
+  job:
+    config:
+      override_dirname:
+        exclude_keys:
+          - wandb_run_name_prefix
   sweep:
     dir: ./exp/${now:%Y.%m.%d}/${now:%H%M}_${agent_cfg.experiment}
     subdir: ${hydra.job.num}
