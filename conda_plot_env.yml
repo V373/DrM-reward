@@ -1,0 +1,7 @@
+name: drm-plot
+channels:
+  - defaults
+dependencies:
+  - python=3.11.16
+  - numpy=1.26.4
+  - matplotlib-base=3.9.2

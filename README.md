@@ -9,35 +9,54 @@ This repository is the official PyTorch implementation of **DrM**. **DrM**, a vi
 </p>
 
 # 🛠️ Installation Instructions
-First, create a virtual environment and install all required packages. 
+
+The supported training environment is `drm-cu128`: Python 3.9, PyTorch
+2.8.0 with CUDA 12.8, and NumPy 1.26.4. It requires an NVIDIA driver that
+supports CUDA 12.8. On Ubuntu, install the system libraries used by
+MuJoCo's off-screen EGL renderer first:
+
 ```bash
 sudo apt update
-sudo apt install libosmesa6-dev libegl1-mesa libgl1-mesa-glx libglfw3 
-conda env create -f conda_env.yml 
-conda activate drm
-pip3 install torch==1.12.1+cu116 torchvision==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
+sudo apt install libosmesa6-dev libegl1 libgl1 libglfw3
 ```
 
-Next, install the additional dependencies required for MetaWorld and Adroit. 
-```
-cd metaworld
-pip install -e .
-cd ..
-cd rrl-dependencies
-pip install -e .
-cd mj_envs
-pip install -e .
-cd ..
-cd mjrl
-pip install -e .
+Create the training environment, then install the packages bundled with this
+repository in editable mode. Run these commands from the repository root:
+
+```bash
+conda env create -f conda_env.yml
+conda activate drm-cu128
+pip install -e ./metaworld
+pip install -e ./rrl-dependencies
+pip install -e ./rrl-dependencies/mj_envs
+pip install -e ./rrl-dependencies/mjrl
 ```
 
-Tips: please check that your mujoco_py can use gpu render to improve FPS during training.
+`free-mujoco-py` compiles its extension when it is first imported. For GPU
+off-screen rendering, verify that the generated module is the Linux GPU
+extension:
 
+```bash
+python -c "import mujoco_py; print(mujoco_py.cymj)"
 ```
-mujoco_py.cymj
-<module 'cymj' from './mujoco_py/generated/cymj_2.1.2.14_38_linuxgpuextensionbuilder_38.so'>
+
+If this step cannot initialize EGL, first confirm that the host NVIDIA driver
+is visible (for example with `nvidia-smi`). Do not install Conda Mesa/EGL
+packages into `drm-cu128`; they can take precedence over the host NVIDIA EGL
+implementation and prevent MuJoCo from rendering on the GPU.
+
+### Plotting environment
+
+Evaluation-success plots use a separate, minimal environment so Matplotlib
+does not alter the training stack:
+
+```bash
+conda env create -f conda_plot_env.yml
+conda run -n drm-plot python scripts/plot_metaworld_eval_success.py --downsample 5
 ```
+
+The plotting script reads selected `exp_local/**/eval.csv` files and writes
+figures under `images/metaworld_eval_success/`.
 
 ## 💻 Code Usage
 If you would like to run DrM on [DeepMind Control Suite](https://github.com/google-deepmind/dm_control), please use train_dmc.py to train DrM policies on different configs.
