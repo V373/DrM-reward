@@ -45,11 +45,80 @@ DEFAULT_DOWNSAMPLE = 5
 # Edit these two constants to select a different fully-completed task set.
 # Each reward list must be ordered by SEEDS (121, 122, 123, 124, 125).
 SELECTED_TASKS: Tuple[str, ...] = (
-    "button-press-wall",
-    "coffee-push",
+    "sweep-into",
+    "assembly",
 )
 
 RUN_DIRS: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "sweep-into": {
+        "sparse": (
+            "2026.09.17/193750_sweep-into",
+            "2026.09.17/214254_sweep-into",
+            "2026.09.18/002906_sweep-into",
+            "2026.09.18/023528_sweep-into",
+            "2026.09.18/044115_sweep-into",
+        ),
+        "pbrs": (
+            "2026.09.18/064914_sweep-into",
+            "2026.09.18/094813_sweep-into",
+            "2026.09.18/124807_sweep-into",
+            "2026.09.18/154851_sweep-into",
+            "2026.09.18/185159_sweep-into",
+        ),
+        "dense": (
+            "2026.09.18/215303_sweep-into",
+            "2026.09.19/000111_sweep-into",
+            "2026.09.19/020850_sweep-into",
+            "2026.09.19/041647_sweep-into",
+            "2026.09.19/062430_sweep-into",
+        ),
+    },
+    "assembly": {
+        "sparse": (
+            "2026.09.19/083255_assembly",
+            "2026.09.19/103950_assembly",
+            "2026.09.19/124901_assembly",
+            "2026.09.19/145647_assembly",
+            "2026.09.19/170428_assembly",
+        ),
+        "pbrs": (
+            "2026.09.19/191036_assembly",
+            "2026.09.19/220823_assembly",
+            "2026.09.20/010509_assembly",
+            "2026.09.20/040250_assembly",
+            "2026.09.20/065952_assembly",
+        ),
+        "dense": (
+            "2026.09.20/095635_assembly",
+            "2026.09.20/120316_assembly",
+            "2026.09.20/140925_assembly",
+            "2026.09.20/161610_assembly",
+            "2026.09.20/182406_assembly",
+        ),
+    },
+    "drawer-open": {
+        "sparse": (
+            "2026.09.16/081941_drawer-open",
+            "2026.09.16/102226_drawer-open",
+            "2026.09.16/122450_drawer-open",
+            "2026.09.16/142739_drawer-open",
+            "2026.09.16/163101_drawer-open",
+        ),
+        "pbrs": (
+            "2026.09.16/183237_drawer-open",
+            "2026.09.16/212836_drawer-open",
+            "2026.09.17/002517_drawer-open",
+            "2026.09.17/032243_drawer-open",
+            "2026.09.17/061916_drawer-open",
+        ),
+        "dense": (
+            "2026.09.17/091530_drawer-open",
+            "2026.09.17/111945_drawer-open",
+            "2026.09.17/132453_drawer-open",
+            "2026.09.17/153108_drawer-open",
+            "2026.09.17/173504_drawer-open",
+        ),
+    },
     "button-press-wall": {
         "sparse": (
             "2026.09.10/182851_button-press-wall",
@@ -238,7 +307,7 @@ def plot_task(task: str, downsample: int) -> Tuple[Path, int]:
     axis.set_title(task)
     axis.set_xlabel("Env Steps (1M)")
     axis.set_ylabel("Success rate")
-    axis.set_ylim(0.0, 1.0)
+    axis.set_ylim(-0.1, 1.1)
     axis.margins(x=0.0)
     axis.grid(True, alpha=0.3)
     axis.legend(title="Reward")

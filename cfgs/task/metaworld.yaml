@@ -28,6 +28,7 @@ shaped_reward:
   sparse_scale: 1.0
   pbrs_gamma: 0.97
   pbrs_dense_scale: 1.0
+  pbrs_zero_next_potential_on_episode_end: false # for DrM in MetaWorld, this should be false
   pbrs_progress_bias_enabled: false
   pbrs_progress_bias_b: 0.0
   pbrs_progress_exp_enabled: false

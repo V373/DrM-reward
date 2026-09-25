@@ -31,6 +31,8 @@ class MetaWorldShapedRewardManager:
         self.sparse_scale = float(cfg.get("sparse_scale", 1.0))
         self.shaping_scale = float(cfg.get("pbrs_dense_scale", 1.0))
         self.pbrs_gamma = float(cfg.get("pbrs_gamma", 0.97))
+        self.zero_next_potential_on_episode_end = bool(
+            cfg.get("pbrs_zero_next_potential_on_episode_end", False))
         if not all(np.isfinite(value) for value in (
                 self.sparse_scale, self.shaping_scale, self.pbrs_gamma)):
             raise ValueError("shaped reward scales and gamma must be finite")
@@ -97,13 +99,15 @@ class MetaWorldShapedRewardManager:
             progress_next = 0.0
             raw_shaping = progress
         else:
-            progress_next = 0.0 if done else inferred_next
+            zero_next_potential = (
+                done and self.zero_next_potential_on_episode_end)
+            progress_next = 0.0 if zero_next_potential else inferred_next
             current_potential = progress + self.progress_bias
             next_potential = progress_next + self.progress_bias
             if self.exp_enabled:
                 current_potential = self.exp_base ** current_potential
                 next_potential = self.exp_base ** next_potential
-            if done:
+            if zero_next_potential:
                 next_potential = 0.0
             raw_shaping = (
                 self.pbrs_gamma * next_potential - current_potential)

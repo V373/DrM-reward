@@ -84,19 +84,21 @@ def test_dense_reward_uses_current_progress(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("done", "expected_shaping"),
+    ("done", "zero_next_potential", "expected_shaping"),
     [
-        (False, 0.97 * 0.7 - 0.2),
-        (True, -0.2),
+        (False, False, 0.97 * 0.7 - 0.2),
+        (True, False, 0.97 * 0.7 - 0.2),
+        (True, True, -0.2),
     ],
 )
 def test_pbrs_reward_and_terminal_potential(
-        tmp_path, monkeypatch, done, expected_shaping):
+        tmp_path, monkeypatch, done, zero_next_potential, expected_shaping):
     manager = _manager(
         tmp_path,
         monkeypatch,
         sparse_scale=2.0,
         pbrs_dense_scale=1.5,
+        pbrs_zero_next_potential_on_episode_end=zero_next_potential,
     )
     manager.provider = _ScriptedProvider(current=0.2, next_progress=0.7)
 
@@ -104,7 +106,7 @@ def test_pbrs_reward_and_terminal_potential(
 
     assert reward == pytest.approx(1.0 + 1.5 * expected_shaping)
     assert metrics["shaped_reward/progress_next"] == pytest.approx(
-        0.0 if done else 0.7)
+        0.0 if zero_next_potential else 0.7)
 
 
 def test_pbrs_bias_and_exponential_potential(tmp_path, monkeypatch):
@@ -151,11 +153,30 @@ def test_episode_reward_uses_existing_pbrs_indexing(tmp_path, monkeypatch):
         dones=[False, True],
     )
 
-    np.testing.assert_allclose(rewards, [0.97 * 0.7 - 0.2, 1.0 - 0.7])
+    np.testing.assert_allclose(
+        rewards, [0.97 * 0.7 - 0.2, 1.0 + 0.97 * 0.9 - 0.7])
     assert metrics[0]["shaped_reward/progress"] == pytest.approx(0.2)
     assert metrics[0]["shaped_reward/progress_next"] == pytest.approx(0.7)
     assert metrics[1]["shaped_reward/progress"] == pytest.approx(0.7)
-    assert metrics[1]["shaped_reward/progress_next"] == 0.0
+    assert metrics[1]["shaped_reward/progress_next"] == pytest.approx(0.9)
+
+
+def test_episode_reward_can_zero_final_potential(tmp_path, monkeypatch):
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        enable_ood_filter=True,
+        pbrs_zero_next_potential_on_episode_end=True,
+    )
+    manager.provider = _FinalizedProvider([0.2, 0.7, 0.9])
+
+    rewards, metrics = manager.finalize_episode(
+        sparse_rewards=[0.0, 1.0],
+        dones=[False, True],
+    )
+
+    np.testing.assert_allclose(rewards, [0.97 * 0.7 - 0.2, 1.0 - 0.7])
+    assert metrics[1]["shaped_reward/progress_next"] == pytest.approx(0.0)
 
 
 class _FakeTimeStep(NamedTuple):
@@ -639,6 +660,7 @@ def test_shaped_reward_defaults_are_disabled_and_asset_free():
     assert shaped["ood_filter_min_ood_run"] is None
     assert shaped["pbrs_dense_scale"] == 1.0
     assert shaped["pbrs_gamma"] == 0.97
+    assert shaped["pbrs_zero_next_potential_on_episode_end"] is False
     assert shaped["reward_render_size"] == 448
     assert shaped["reward_crop_size"] == [224, 224]
     assert shaped["reward_crop_offset"] == [56, 112]
