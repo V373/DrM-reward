@@ -47,6 +47,7 @@ DEFAULT_DOWNSAMPLE = 5
 SELECTED_TASKS: Tuple[str, ...] = (
     "button-press-wall",
     "coffee-push",
+    "soccer-meta",
 )
 
 RUN_DIRS: Dict[str, Dict[str, Tuple[str, ...]]] = {
@@ -94,6 +95,29 @@ RUN_DIRS: Dict[str, Dict[str, Tuple[str, ...]]] = {
             "2026.09.13/232913_coffee-push",
             "2026.09.14/014131_coffee-push",
             "2026.09.14/035222_coffee-push",
+        ),
+    },
+    "soccer-meta": {
+        "sparse": (
+            "2026.09.14/060506_soccer-meta",
+            "2026.09.14/081349_soccer-meta",
+            "2026.09.14/102226_soccer-meta",
+            "2026.09.14/123055_soccer-meta",
+            "2026.09.14/161917_soccer-meta",
+        ),
+        "pbrs": (
+            "2026.09.16/044953_soccer-meta",
+            "2026.09.16/080406_soccer-meta",
+            "2026.09.16/111950_soccer-meta",
+            "2026.09.16/143613_soccer-meta",
+            "2026.09.16/175150_soccer-meta",
+        ),
+        "dense": (
+            "2026.09.16/210906_soccer-meta",
+            "2026.09.17/001512_soccer-meta",
+            "2026.09.17/030933_soccer-meta",
+            "2026.09.17/060311_soccer-meta",
+            "2026.09.17/085644_soccer-meta",
         ),
     },
 }
@@ -238,7 +262,7 @@ def plot_task(task: str, downsample: int) -> Tuple[Path, int]:
     axis.set_title(task)
     axis.set_xlabel("Env Steps (1M)")
     axis.set_ylabel("Success rate")
-    axis.set_ylim(0.0, 1.0)
+    axis.set_ylim(-0.1, 1.1)
     axis.margins(x=0.0)
     axis.grid(True, alpha=0.3)
     axis.legend(title="Reward")
@@ -267,6 +291,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"last point (default: {DEFAULT_DOWNSAMPLE})."
         ),
     )
+    parser.add_argument(
+        "tasks",
+        nargs="*",
+        choices=sorted(RUN_DIRS),
+        help="Optional task names to plot instead of SELECTED_TASKS.",
+    )
     args = parser.parse_args(argv)
     if args.downsample < 1:
         parser.error("--downsample must be at least 1")
@@ -276,7 +306,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     generated = 0
-    for task in SELECTED_TASKS:
+    tasks = tuple(args.tasks) if args.tasks else SELECTED_TASKS
+    for task in tasks:
         try:
             output_path, point_count = plot_task(task, args.downsample)
         except DataError as error:
