@@ -48,7 +48,7 @@ class Workspace:
                 exp_name = '_'.join([cfg.task_name, str(cfg.seed)])
                 exp_name = f'{cfg.wandb_run_name_prefix}{exp_name}'
             group_name = re.search(r'\.(.+)\.', cfg.agent._target_).group(1)
-            wandb.init(project="DrM",
+            wandb.init(project="DrM-Yao",
                        group=group_name,
                        name=exp_name,
                        config=cfg)

@@ -132,6 +132,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--end-index",
+        type=int,
+        choices=range(1, len(EXPERIMENTS) + 1),
+        default=len(EXPERIMENTS),
+        metavar=f"1-{len(EXPERIMENTS)}",
+        help=(
+            "1-based experiment index to stop at, inclusive "
+            f"(default: {len(EXPERIMENTS)})."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -143,13 +154,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    selected_experiments = EXPERIMENTS[args.start_index - 1:]
+    if args.end_index < args.start_index:
+        raise ValueError("end-index must be greater than or equal to start-index")
+
+    selected_experiments = EXPERIMENTS[args.start_index - 1:args.end_index]
     if args.dry_run:
         for experiment in selected_experiments:
             print(shlex.join(build_command(experiment)))
         print(
             f"Dry run: printed {len(selected_experiments)} commands "
-            f"starting at experiment {args.start_index}; "
+            f"for experiments {args.start_index}-{args.end_index}; "
             "no experiments were started."
         )
         return 0

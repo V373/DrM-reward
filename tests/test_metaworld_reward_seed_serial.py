@@ -97,7 +97,7 @@ def test_dry_run_starts_at_default_experiment(capsys):
         "seed=125 wandb_run_name=dense-assembly-seed125"
     )
     assert lines[-1] == (
-        "Dry run: printed 73 commands starting at experiment 18; "
+        "Dry run: printed 73 commands for experiments 18-90; "
         "no experiments were started."
     )
 
@@ -111,7 +111,24 @@ def test_start_index_can_include_the_full_matrix(capsys):
         "seed=121 wandb_run_name=sparse-button-press-wall-seed121"
     )
     assert lines[-1] == (
-        "Dry run: printed 90 commands starting at experiment 1; "
+        "Dry run: printed 90 commands for experiments 1-90; "
+        "no experiments were started."
+    )
+
+
+def test_end_index_selects_an_inclusive_experiment_range(capsys):
+    assert main(["--dry-run", "--start-index", "18", "--end-index", "20"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 4
+    assert lines[0].endswith(
+        "seed=123 wandb_run_name=sparse-coffee-push-seed123"
+    )
+    assert lines[2].endswith(
+        "seed=125 wandb_run_name=sparse-coffee-push-seed125"
+    )
+    assert lines[-1] == (
+        "Dry run: printed 3 commands for experiments 18-20; "
         "no experiments were started."
     )
 
