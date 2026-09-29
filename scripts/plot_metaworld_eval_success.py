@@ -48,6 +48,35 @@ SELECTED_TASKS: Tuple[str, ...] = (
     "sweep-into",
     "assembly",
 )
+BOOTSTRAP_TASKS: Tuple[str, ...] = (
+    "drawer-open",
+    "sweep-into",
+    "assembly",
+)
+
+BOOTSTRAP_PBRS_RUN_DIRS: Dict[str, Tuple[str, ...]] = {
+    "drawer-open": (
+        "2026.09.25/193225_drawer-open",
+        "2026.09.25/222707_drawer-open",
+        "2026.09.26/012059_drawer-open",
+        "2026.09.26/041457_drawer-open",
+        "2026.09.26/070830_drawer-open",
+    ),
+    "sweep-into": (
+        "2026.09.26/100148_sweep-into",
+        "2026.09.26/125712_sweep-into",
+        "2026.09.26/155227_sweep-into",
+        "2026.09.26/184812_sweep-into",
+        "2026.09.26/214250_sweep-into",
+    ),
+    "assembly": (
+        "2026.09.27/003748_assembly",
+        "2026.09.27/033446_assembly",
+        "2026.09.27/063140_assembly",
+        "2026.09.27/092832_assembly",
+        "2026.09.27/122425_assembly",
+    ),
+}
 
 RUN_DIRS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "sweep-into": {
@@ -266,6 +295,7 @@ def summarize_seed_curves(
 def collect_task_curves(
     task: str,
     downsample: int,
+    bootstrap: bool = False,
 ) -> Dict[str, Tuple[np.ndarray, ...]]:
     """Validate and collect all 15 selected eval curves for one task."""
 
@@ -274,7 +304,9 @@ def collect_task_curves(
 
     result: Dict[str, Tuple[np.ndarray, ...]] = {}
     for reward in REWARDS:
-        run_dirs = RUN_DIRS[task].get(reward)
+        run_dirs = (BOOTSTRAP_PBRS_RUN_DIRS.get(task)
+                    if bootstrap and reward == "pbrs"
+                    else RUN_DIRS[task].get(reward))
         if run_dirs is None or len(run_dirs) != len(SEEDS):
             count = 0 if run_dirs is None else len(run_dirs)
             raise DataError(
@@ -289,14 +321,16 @@ def collect_task_curves(
     return result
 
 
-def plot_task(task: str, downsample: int) -> Tuple[Path, int]:
+def plot_task(task: str, downsample: int, bootstrap: bool = False) -> Tuple[Path, int]:
     """Create one success-rate plot containing the three reward variants."""
 
-    curves = collect_task_curves(task, downsample)
+    curves = collect_task_curves(task, downsample, bootstrap)
     figure, axis = plt.subplots(figsize=(6.0, 4.0), dpi=300)
     for reward in REWARDS:
         frames, mean, lower, upper = curves[reward]
         label, color = REWARD_STYLES[reward]
+        if bootstrap and reward == "pbrs":
+            label = "Bootstrap PBRS"
         frames_in_millions = frames / 1_000_000.0
         line_width = 2.0 if reward == "pbrs" else 1.0
         axis.plot(frames_in_millions, mean, color=color, linewidth=line_width,
@@ -315,7 +349,8 @@ def plot_task(task: str, downsample: int) -> Tuple[Path, int]:
 
     output_dir = IMAGE_ROOT / task
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "eval_success_rate.png"
+    filename = "eval_success_rate_bootstrap.png" if bootstrap else "eval_success_rate.png"
+    output_path = output_dir / filename
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
     point_count = len(curves[REWARDS[0]][0])
@@ -336,6 +371,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"last point (default: {DEFAULT_DOWNSAMPLE})."
         ),
     )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Plot bootstrap PBRS against the original sparse and dense runs.",
+    )
     args = parser.parse_args(argv)
     if args.downsample < 1:
         parser.error("--downsample must be at least 1")
@@ -345,9 +385,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     generated = 0
-    for task in SELECTED_TASKS:
+    for task in BOOTSTRAP_TASKS if args.bootstrap else SELECTED_TASKS:
         try:
-            output_path, point_count = plot_task(task, args.downsample)
+            output_path, point_count = plot_task(task, args.downsample, args.bootstrap)
         except DataError as error:
             print(f"[skip] {task}: {error}", file=sys.stderr)
             continue
