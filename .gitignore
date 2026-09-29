@@ -1,4 +1,7 @@
 exp_local/
+metaworld/data/
+tmp_claude/
+tmp_progress_video_ood_demo/
 nohup.out
 run.sh
 

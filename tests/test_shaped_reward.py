@@ -671,7 +671,7 @@ def test_shaped_reward_defaults_are_disabled_and_asset_free():
         assert shaped[name] is None
 
     assembly_shaped = assembly_cfg["shaped_reward"]
-    assert assembly_shaped["enable_ood_filter"] is True
+    assert assembly_shaped["enable_ood_filter"] is False
     assert assembly_shaped["ood_filter_max_gap"] == 5
     assert assembly_shaped["ood_filter_min_ood_run"] == 20
 

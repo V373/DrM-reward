@@ -194,6 +194,29 @@ RUN_DIRS: Dict[str, Dict[str, Tuple[str, ...]]] = {
             "2026.09.14/035222_coffee-push",
         ),
     },
+    "soccer-meta": {
+        "sparse": (
+            "2026.09.14/060506_soccer-meta",
+            "2026.09.14/081349_soccer-meta",
+            "2026.09.14/102226_soccer-meta",
+            "2026.09.14/123055_soccer-meta",
+            "2026.09.14/161917_soccer-meta",
+        ),
+        "pbrs": (
+            "2026.09.16/044953_soccer-meta",
+            "2026.09.16/080406_soccer-meta",
+            "2026.09.16/111950_soccer-meta",
+            "2026.09.16/143613_soccer-meta",
+            "2026.09.16/175150_soccer-meta",
+        ),
+        "dense": (
+            "2026.09.16/210906_soccer-meta",
+            "2026.09.17/001512_soccer-meta",
+            "2026.09.17/030933_soccer-meta",
+            "2026.09.17/060311_soccer-meta",
+            "2026.09.17/085644_soccer-meta",
+        ),
+    },
 }
 
 REWARD_STYLES = {
@@ -376,16 +399,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Plot bootstrap PBRS against the original sparse and dense runs.",
     )
+    parser.add_argument(
+        "tasks",
+        nargs="*",
+        help="Optional task names to plot instead of SELECTED_TASKS.",
+    )
     args = parser.parse_args(argv)
     if args.downsample < 1:
         parser.error("--downsample must be at least 1")
+    for task in args.tasks:
+        if task not in RUN_DIRS:
+            parser.error(f"unknown task: {task}")
+        if args.bootstrap and task not in BOOTSTRAP_PBRS_RUN_DIRS:
+            parser.error(f"no bootstrap runs selected for task: {task}")
     return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     generated = 0
-    for task in BOOTSTRAP_TASKS if args.bootstrap else SELECTED_TASKS:
+    default_tasks = BOOTSTRAP_TASKS if args.bootstrap else SELECTED_TASKS
+    tasks = tuple(args.tasks) if args.tasks else default_tasks
+    for task in tasks:
         try:
             output_path, point_count = plot_task(task, args.downsample, args.bootstrap)
         except DataError as error:
